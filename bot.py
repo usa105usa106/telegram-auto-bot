@@ -48,10 +48,11 @@ SIGNAL_COOLDOWN_MINUTES = int(os.getenv("SIGNAL_COOLDOWN_MINUTES", "360"))
 MAX_SIGNALS_PER_SCAN = int(os.getenv("MAX_SIGNALS_PER_SCAN", "3"))
 KLINES_LIMIT = int(os.getenv("KLINES_LIMIT", "160"))
 
-# auto = Bybit first, Binance fallback. Binance is sometimes unavailable from Railway regions.
+# auto = OKX first, then Bybit/Binance fallback. Binance/Bybit can be unavailable from Railway US regions.
 MARKET_DATA_PROVIDER = os.getenv("MARKET_DATA_PROVIDER", "auto").strip().lower()
 BYBIT_API_BASE = os.getenv("BYBIT_API_BASE", "https://api.bybit.com").rstrip("/")
 BINANCE_API_BASE = os.getenv("BINANCE_API_BASE", "https://api.binance.com").rstrip("/")
+OKX_API_BASE = os.getenv("OKX_API_BASE", "https://www.okx.com").rstrip("/")
 
 STOP_ATR_MULTIPLIER = float(os.getenv("STOP_ATR_MULTIPLIER", "1.2"))
 MIN_RISK_PCT = float(os.getenv("MIN_RISK_PCT", "0.8"))
@@ -336,6 +337,58 @@ def bybit_interval(interval: str) -> str:
     return mapping.get(interval, interval)
 
 
+def okx_symbol(symbol: str) -> str:
+    clean = symbol.upper().strip()
+    if "-" in clean:
+        return clean
+    if clean.endswith("USDT"):
+        return clean[:-4] + "-USDT"
+    if clean.endswith("USDC"):
+        return clean[:-4] + "-USDC"
+    return clean
+
+
+def okx_interval(interval: str) -> str:
+    mapping = {
+        "1m": "1m", "3m": "3m", "5m": "5m", "15m": "15m", "30m": "30m",
+        "1h": "1H", "2h": "2H", "4h": "4H", "6h": "6H", "12h": "12H",
+        "1d": "1D", "1w": "1W", "1M": "1M",
+    }
+    return mapping.get(interval, interval)
+
+
+async def fetch_okx_klines(session: aiohttp.ClientSession, symbol: str, interval: str, limit: int) -> Optional[list[dict[str, float]]]:
+    url = f"{OKX_API_BASE}/api/v5/market/candles"
+    params = {"instId": okx_symbol(symbol), "bar": okx_interval(interval), "limit": str(min(limit, 300))}
+    async with session.get(url, params=params, timeout=12) as response:
+        if response.status != 200:
+            text = await response.text()
+            logging.warning("OKX candles HTTP error %s %s: %s", symbol, response.status, text[:160])
+            return None
+        raw = await response.json()
+    if str(raw.get("code")) != "0":
+        logging.warning("OKX API error %s: %s", symbol, str(raw)[:180])
+        return None
+    items = raw.get("data", [])
+    candles: list[dict[str, float]] = []
+    for item in items:
+        try:
+            ts = float(item[0])
+            candles.append({
+                "open_time": ts,
+                "open": float(item[1]),
+                "high": float(item[2]),
+                "low": float(item[3]),
+                "close": float(item[4]),
+                "volume": float(item[5]) if len(item) > 5 else 0.0,
+                "close_time": ts,
+            })
+        except Exception:
+            continue
+    candles.sort(key=lambda c: c["open_time"])
+    return candles or None
+
+
 async def fetch_binance_klines(session: aiohttp.ClientSession, symbol: str, interval: str, limit: int) -> Optional[list[dict[str, float]]]:
     url = f"{BINANCE_API_BASE}/api/v3/klines"
     params = {"symbol": symbol.upper(), "interval": interval, "limit": str(limit)}
@@ -396,15 +449,19 @@ async def fetch_bybit_klines(session: aiohttp.ClientSession, symbol: str, interv
 
 async def fetch_klines(session: aiohttp.ClientSession, symbol: str, interval: str, limit: int) -> Optional[list[dict[str, float]]]:
     try:
+        if MARKET_DATA_PROVIDER == "okx":
+            return await fetch_okx_klines(session, symbol, interval, limit)
         if MARKET_DATA_PROVIDER == "bybit":
             return await fetch_bybit_klines(session, symbol, interval, limit)
         if MARKET_DATA_PROVIDER == "binance":
             return await fetch_binance_klines(session, symbol, interval, limit)
-        # auto: Bybit first, Binance fallback.
-        data = await fetch_bybit_klines(session, symbol, interval, limit)
-        if data:
-            return data
-        return await fetch_binance_klines(session, symbol, interval, limit)
+        # auto: OKX first, then Bybit, then Binance.
+        # Railway US regions often get blocked by Binance/Bybit; OKX usually works better for public candles.
+        for fetcher in (fetch_okx_klines, fetch_bybit_klines, fetch_binance_klines):
+            data = await fetcher(session, symbol, interval, limit)
+            if data:
+                return data
+        return None
     except Exception:
         logging.exception("Ошибка запроса свечей для %s", symbol)
         return None
