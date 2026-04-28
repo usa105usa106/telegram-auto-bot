@@ -13,7 +13,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardMarkup
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -90,12 +90,122 @@ DATA_DIR = Path(__file__).parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 SUBSCRIBERS_FILE = DATA_DIR / "subscribers.json"
 SENT_SIGNALS_FILE = DATA_DIR / "sent_signals.json"
+SETTINGS_FILE = DATA_DIR / "settings.json"
+
+TIMEFRAME_OPTIONS = ["5m", "15m", "30m", "1h", "4h"]
+PROBABILITY_OPTIONS = [60, 70, 75, 80, 85, 90]
+SCAN_INTERVAL_OPTIONS = [120, 300, 600, 900, 1800, 3600]
+
+
+def load_runtime_settings() -> dict[str, Any]:
+    return load_json(SETTINGS_FILE, {})
+
+
+def save_runtime_settings() -> None:
+    save_json(SETTINGS_FILE, {
+        "MIN_SIGNAL_PROBABILITY": MIN_SIGNAL_PROBABILITY,
+        "SIGNAL_TIMEFRAME": SIGNAL_TIMEFRAME,
+        "SCAN_INTERVAL_SECONDS": SCAN_INTERVAL_SECONDS,
+    })
+
+
+def apply_runtime_settings(settings: dict[str, Any]) -> None:
+    global MIN_SIGNAL_PROBABILITY, SIGNAL_TIMEFRAME, SCAN_INTERVAL_SECONDS
+    try:
+        probability = int(settings.get("MIN_SIGNAL_PROBABILITY", MIN_SIGNAL_PROBABILITY))
+        MIN_SIGNAL_PROBABILITY = max(1, min(100, probability))
+    except Exception:
+        pass
+
+    timeframe = str(settings.get("SIGNAL_TIMEFRAME", SIGNAL_TIMEFRAME)).strip()
+    if timeframe in TIMEFRAME_OPTIONS:
+        SIGNAL_TIMEFRAME = timeframe
+
+    try:
+        interval = int(settings.get("SCAN_INTERVAL_SECONDS", SCAN_INTERVAL_SECONDS))
+        SCAN_INTERVAL_SECONDS = max(30, min(86400, interval))
+    except Exception:
+        pass
+
+
+def human_interval(seconds: int) -> str:
+    if seconds % 3600 == 0:
+        hours = seconds // 3600
+        return f"{hours} ч"
+    if seconds % 60 == 0:
+        minutes = seconds // 60
+        return f"{minutes} мин"
+    return f"{seconds} сек"
+
+
+def settings_menu_text() -> str:
+    return (
+        "<b>⚙️ Настройки авто-бота</b>\n\n"
+        f"Таймфрейм: <b>{html.escape(SIGNAL_TIMEFRAME)}</b>\n"
+        f"Проходимость: <b>{MIN_SIGNAL_PROBABILITY}%</b>\n"
+        f"Интервал скана: <b>{human_interval(SCAN_INTERVAL_SECONDS)}</b>\n\n"
+        "Нажми кнопку ниже, чтобы изменить настройку. Изменения применяются сразу."
+    )
+
+
+def settings_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="⏱ Таймфрейм", callback_data="settings:timeframe"),
+            InlineKeyboardButton(text="🎯 Проходимость", callback_data="settings:probability"),
+        ],
+        [InlineKeyboardButton(text="🔁 Интервал скана", callback_data="settings:interval")],
+        [InlineKeyboardButton(text="❌ Закрыть", callback_data="settings:close")],
+    ])
+
+
+def timeframe_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    for i in range(0, len(TIMEFRAME_OPTIONS), 3):
+        rows.append([
+            InlineKeyboardButton(
+                text=("✅ " if value == SIGNAL_TIMEFRAME else "") + value,
+                callback_data=f"settings:set_timeframe:{value}",
+            )
+            for value in TIMEFRAME_OPTIONS[i:i + 3]
+        ])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def probability_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    for i in range(0, len(PROBABILITY_OPTIONS), 3):
+        rows.append([
+            InlineKeyboardButton(
+                text=("✅ " if value == MIN_SIGNAL_PROBABILITY else "") + f"{value}%",
+                callback_data=f"settings:set_probability:{value}",
+            )
+            for value in PROBABILITY_OPTIONS[i:i + 3]
+        ])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def interval_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    for i in range(0, len(SCAN_INTERVAL_OPTIONS), 2):
+        rows.append([
+            InlineKeyboardButton(
+                text=("✅ " if value == SCAN_INTERVAL_SECONDS else "") + human_interval(value),
+                callback_data=f"settings:set_interval:{value}",
+            )
+            for value in SCAN_INTERVAL_OPTIONS[i:i + 2]
+        ])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📊 Статус"), KeyboardButton(text="🧪 Скан сейчас")],
         [KeyboardButton(text="🆔 Мой ID"), KeyboardButton(text="❓ Помощь")],
-        [KeyboardButton(text="🔕 Отписаться")],
+        [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="🔕 Отписаться")],
     ],
     resize_keyboard=True,
 )
@@ -139,6 +249,9 @@ def load_json(path: Path, default: Any) -> Any:
 
 def save_json(path: Path, data: Any) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+apply_runtime_settings(load_runtime_settings())
 
 
 def load_subscribers() -> Set[int]:
@@ -919,7 +1032,7 @@ async def cmd_start(message: Message) -> None:
         "Привет! Я Telegram-бот для автоматических торговых сигналов.\n\n"
         "Ты подписан на сигналы. Бот сам сканирует рынок и отправляет сетапы "
         f"с проходимостью от {MIN_SIGNAL_PROBABILITY}% и выше.\n\n"
-        "Команды: /help, /status, /scan, /id, /stop",
+        "Команды: /help, /status, /settings, /scan, /id, /stop",
         reply_markup=keyboard,
     )
 
@@ -932,6 +1045,7 @@ async def cmd_help(message: Message) -> None:
             "\n\n<b>Команды админа:</b>\n"
             "• /scan — запустить авто-скан сейчас\n"
             "• /status — настройки авто-сканера\n"
+            "• /settings — кнопки настроек авто-сканера\n"
             "• /signal — ручной сигнал\n\n"
             "Ручной формат:\n"
             "<code>/signal TRX LONG 82 0.3235 0.3195 0.3265 0.3290 0.3320 Комментарий</code>"
@@ -944,6 +1058,7 @@ async def cmd_help(message: Message) -> None:
         "• /start — подписаться\n"
         "• /stop — отписаться\n"
         "• /status — статус бота\n"
+        "• /settings — настройки бота через кнопки\n"
         "• /id — показать Telegram ID"
         f"{admin_help}",
         reply_markup=keyboard,
@@ -983,6 +1098,106 @@ async def cmd_status(message: Message) -> None:
         f"Доп. чаты из SIGNAL_CHAT_IDS: <b>{len(SIGNAL_CHAT_IDS)}</b>",
         reply_markup=keyboard,
     )
+
+
+@dp.message(Command("settings"))
+async def cmd_settings(message: Message) -> None:
+    if not is_admin(message.from_user.id):
+        await message.answer("Настройки доступны только админу.")
+        return
+    await message.answer(settings_menu_text(), reply_markup=settings_keyboard())
+
+
+@dp.callback_query(F.data.startswith("settings:"))
+async def settings_callback(callback: CallbackQuery) -> None:
+    global SIGNAL_TIMEFRAME, MIN_SIGNAL_PROBABILITY, SCAN_INTERVAL_SECONDS
+
+    if callback.from_user is None or not is_admin(callback.from_user.id):
+        await callback.answer("Только админ может менять настройки", show_alert=True)
+        return
+
+    data = callback.data or ""
+    message = callback.message
+    if message is None:
+        await callback.answer()
+        return
+
+    if data == "settings:menu":
+        await message.edit_text(settings_menu_text(), reply_markup=settings_keyboard())
+        await callback.answer()
+        return
+
+    if data == "settings:timeframe":
+        await message.edit_text(
+            f"<b>⏱ Выбери таймфрейм</b>\n\nСейчас: <b>{html.escape(SIGNAL_TIMEFRAME)}</b>",
+            reply_markup=timeframe_keyboard(),
+        )
+        await callback.answer()
+        return
+
+    if data == "settings:probability":
+        await message.edit_text(
+            f"<b>🎯 Выбери минимальную проходимость</b>\n\nСейчас: <b>{MIN_SIGNAL_PROBABILITY}%</b>",
+            reply_markup=probability_keyboard(),
+        )
+        await callback.answer()
+        return
+
+    if data == "settings:interval":
+        await message.edit_text(
+            f"<b>🔁 Выбери интервал скана</b>\n\nСейчас: <b>{human_interval(SCAN_INTERVAL_SECONDS)}</b>",
+            reply_markup=interval_keyboard(),
+        )
+        await callback.answer()
+        return
+
+    if data.startswith("settings:set_timeframe:"):
+        value = data.split(":", 2)[2]
+        if value in TIMEFRAME_OPTIONS:
+            SIGNAL_TIMEFRAME = value
+            save_runtime_settings()
+            await message.edit_text(settings_menu_text(), reply_markup=settings_keyboard())
+            await callback.answer(f"Таймфрейм: {value}")
+        else:
+            await callback.answer("Неверный таймфрейм", show_alert=True)
+        return
+
+    if data.startswith("settings:set_probability:"):
+        try:
+            value = int(data.split(":", 2)[2])
+        except ValueError:
+            await callback.answer("Неверное значение", show_alert=True)
+            return
+        if value in PROBABILITY_OPTIONS:
+            MIN_SIGNAL_PROBABILITY = value
+            save_runtime_settings()
+            await message.edit_text(settings_menu_text(), reply_markup=settings_keyboard())
+            await callback.answer(f"Проходимость: {value}%")
+        else:
+            await callback.answer("Неверная проходимость", show_alert=True)
+        return
+
+    if data.startswith("settings:set_interval:"):
+        try:
+            value = int(data.split(":", 2)[2])
+        except ValueError:
+            await callback.answer("Неверное значение", show_alert=True)
+            return
+        if value in SCAN_INTERVAL_OPTIONS:
+            SCAN_INTERVAL_SECONDS = value
+            save_runtime_settings()
+            await message.edit_text(settings_menu_text(), reply_markup=settings_keyboard())
+            await callback.answer(f"Интервал: {human_interval(value)}")
+        else:
+            await callback.answer("Неверный интервал", show_alert=True)
+        return
+
+    if data == "settings:close":
+        await message.edit_text("Настройки закрыты.")
+        await callback.answer()
+        return
+
+    await callback.answer()
 
 
 @dp.message(Command("scan"))
@@ -1103,6 +1318,11 @@ async def button_id(message: Message) -> None:
 @dp.message(F.text == "❓ Помощь")
 async def button_help(message: Message) -> None:
     await cmd_help(message)
+
+
+@dp.message(F.text == "⚙️ Настройки")
+async def button_settings(message: Message) -> None:
+    await cmd_settings(message)
 
 
 @dp.message(F.text == "🔕 Отписаться")
