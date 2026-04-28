@@ -38,18 +38,42 @@ SIGNAL_CHAT_IDS = parse_id_set(os.getenv("SIGNAL_CHAT_IDS", ""), allow_negative=
 
 MIN_SIGNAL_PROBABILITY = int(os.getenv("MIN_SIGNAL_PROBABILITY", "80"))
 AUTO_SIGNALS_ENABLED = os.getenv("AUTO_SIGNALS_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
-SYMBOLS = [s.strip().upper() for s in os.getenv(
-    "SYMBOLS",
-    "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,ADAUSDT,DOGEUSDT,TRXUSDT,LINKUSDT,AVAXUSDT,TONUSDT,ONTUSDT",
-).split(",") if s.strip()]
-SIGNAL_TIMEFRAME = os.getenv("SIGNAL_TIMEFRAME", "1h").strip()
+
+# MEXC-версия. По умолчанию бот игнорирует старую переменную SYMBOLS из Railway
+# и сам берёт топ-100 MEXC Futures по 24h обороту. Это сделано специально,
+# чтобы не зависеть от платного редактирования Variables и не сканировать старые 144 пары.
+MARKET_DATA_PROVIDER = "mexc"
+MEXC_API_BASE = os.getenv("MEXC_API_BASE", "https://api.mexc.com").rstrip("/")
+MEXC_DYNAMIC_TOP_SYMBOLS = os.getenv("MEXC_DYNAMIC_TOP_SYMBOLS", "true").strip().lower() in {"1", "true", "yes", "on"}
+MEXC_SYMBOLS_LIMIT = max(1, min(150, int(os.getenv("MEXC_SYMBOLS_LIMIT", "100"))))
+USE_ENV_SYMBOLS = os.getenv("USE_ENV_SYMBOLS", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+DEFAULT_MEXC_FUTURES_SYMBOLS = [
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT", "DOGEUSDT", "ADAUSDT", "TRXUSDT",
+    "LINKUSDT", "AVAXUSDT", "SUIUSDT", "TONUSDT", "BCHUSDT", "LTCUSDT", "DOTUSDT", "NEARUSDT",
+    "UNIUSDT", "AAVEUSDT", "APTUSDT", "ICPUSDT", "FILUSDT", "ETCUSDT", "ATOMUSDT", "HBARUSDT",
+    "OPUSDT", "ARBUSDT", "INJUSDT", "SEIUSDT", "TIAUSDT", "JUPUSDT", "PYTHUSDT", "WIFUSDT",
+    "PEPEUSDT", "SHIBUSDT", "FLOKIUSDT", "BONKUSDT", "ORDIUSDT", "WLDUSDT", "GALAUSDT", "RUNEUSDT",
+    "FTMUSDT", "RENDERUSDT", "ARUSDT", "STXUSDT", "MKRUSDT", "COMPUSDT", "CRVUSDT", "DYDXUSDT",
+    "SANDUSDT", "MANAUSDT", "AXSUSDT", "APEUSDT", "LDOUSDT", "ENSUSDT", "ETHFIUSDT", "STRKUSDT",
+    "PENDLEUSDT", "NOTUSDT", "ZKUSDT", "ZROUSDT", "JTOUSDT", "JASMYUSDT", "GRTUSDT", "CHZUSDT",
+    "ALGOUSDT", "IOTAUSDT", "XLMUSDT", "XMRUSDT", "ZECUSDT", "DASHUSDT", "KASUSDT", "CFXUSDT",
+    "MINAUSDT", "EGLDUSDT", "FLOWUSDT", "ROSEUSDT", "KAVAUSDT", "GMTUSDT", "MASKUSDT", "SNXUSDT",
+    "1INCHUSDT", "YFIUSDT", "SUSHIUSDT", "ZRXUSDT", "BATUSDT", "RVNUSDT", "LPTUSDT", "ANKRUSDT",
+    "WOOUSDT", "BLURUSDT", "CKBUSDT", "CELOUSDT", "QTUMUSDT", "KSMUSDT", "ONTUSDT", "WAVESUSDT",
+    "1000PEPEUSDT", "1000SHIBUSDT", "1000BONKUSDT", "1000FLOKIUSDT", "1000RATSUSDT", "1000SATSUSDT"
+]
+_ENV_SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "").split(",") if s.strip()]
+SYMBOLS = _ENV_SYMBOLS if USE_ENV_SYMBOLS and _ENV_SYMBOLS else DEFAULT_MEXC_FUTURES_SYMBOLS
+
+SIGNAL_TIMEFRAME = os.getenv("SIGNAL_TIMEFRAME", "15m").strip()
 SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "600"))
 SIGNAL_COOLDOWN_MINUTES = int(os.getenv("SIGNAL_COOLDOWN_MINUTES", "360"))
 MAX_SIGNALS_PER_SCAN = int(os.getenv("MAX_SIGNALS_PER_SCAN", "3"))
 KLINES_LIMIT = int(os.getenv("KLINES_LIMIT", "160"))
+FETCH_CONCURRENCY = max(1, int(os.getenv("FETCH_CONCURRENCY", "1")))
+REQUEST_DELAY_SECONDS = float(os.getenv("REQUEST_DELAY_SECONDS", "0.12"))
 
-# auto = OKX first, then Bybit/Binance fallback. Binance/Bybit can be unavailable from Railway US regions.
-MARKET_DATA_PROVIDER = os.getenv("MARKET_DATA_PROVIDER", "auto").strip().lower()
 BYBIT_API_BASE = os.getenv("BYBIT_API_BASE", "https://api.bybit.com").rstrip("/")
 BINANCE_API_BASE = os.getenv("BINANCE_API_BASE", "https://api.binance.com").rstrip("/")
 OKX_API_BASE = os.getenv("OKX_API_BASE", "https://www.okx.com").rstrip("/")
@@ -95,6 +119,7 @@ class ScanResult:
     sendable: list[SignalCandidate] = field(default_factory=list)
     successful_symbols: int = 0
     failed_symbols: int = 0
+    total_symbols: int = 0
     skipped_symbols: list[str] = field(default_factory=list)
     data_provider: str = MARKET_DATA_PROVIDER
     scanned_at: float = field(default_factory=time.time)
@@ -235,8 +260,8 @@ def scan_summary_text(scan: ScanResult, title: str = "🧪 Отчёт авто-�
         f"<b>{title}</b>",
         f"Порог отправки: <b>{MIN_SIGNAL_PROBABILITY}%</b>",
         f"Таймфрейм: <b>{html.escape(SIGNAL_TIMEFRAME)}</b>",
-        f"Источник данных: <b>{html.escape(MARKET_DATA_PROVIDER)}</b>",
-        f"Данные получены: <b>{scan.successful_symbols}</b> / {len(SYMBOLS)}",
+        f"Источник данных: <b>{html.escape(MARKET_DATA_PROVIDER.upper())} Futures</b>",
+        f"Данные получены: <b>{scan.successful_symbols}</b> / {scan.total_symbols or len(SYMBOLS)}",
         f"Ошибки/нет пары: <b>{scan.failed_symbols}</b>",
     ]
     if scan.sendable:
@@ -327,6 +352,148 @@ def macd_values(closes: list[float]) -> tuple[list[float], list[float], list[flo
 
 
 # ---------- exchange data ----------
+
+def mexc_symbol(symbol: str) -> str:
+    clean = symbol.upper().strip().replace("-", "_")
+    if "_" in clean:
+        return clean
+    if clean.endswith("USDT"):
+        return clean[:-4] + "_USDT"
+    if clean.endswith("USDC"):
+        return clean[:-4] + "_USDC"
+    return clean
+
+
+def compact_symbol(symbol: str) -> str:
+    return symbol.upper().replace("_", "").replace("-", "")
+
+
+def display_symbol(symbol: str) -> str:
+    if MARKET_DATA_PROVIDER == "mexc":
+        return mexc_symbol(symbol)
+    return symbol.upper().replace("USDT", "/USDT")
+
+
+def mexc_interval(interval: str) -> str:
+    mapping = {
+        "1m": "Min1", "5m": "Min5", "15m": "Min15", "30m": "Min30",
+        "1h": "Min60", "4h": "Hour4", "8h": "Hour8",
+        "1d": "Day1", "1w": "Week1", "1M": "Month1",
+    }
+    return mapping.get(interval, "Min15")
+
+
+def interval_seconds(interval: str) -> int:
+    mapping = {
+        "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
+        "1h": 3600, "2h": 7200, "4h": 14400, "6h": 21600, "8h": 28800, "12h": 43200,
+        "1d": 86400, "1w": 604800, "1M": 2592000,
+    }
+    return mapping.get(interval, 900)
+
+
+async def fetch_mexc_top_symbols(session: aiohttp.ClientSession, limit: int) -> Optional[list[str]]:
+    url = f"{MEXC_API_BASE}/api/v1/contract/ticker"
+    try:
+        async with session.get(url, timeout=15) as response:
+            if response.status != 200:
+                text = await response.text()
+                logging.warning("MEXC ticker HTTP error %s: %s", response.status, text[:160])
+                return None
+            raw = await response.json()
+    except Exception:
+        logging.exception("Не удалось получить MEXC ticker")
+        return None
+
+    if not raw.get("success"):
+        logging.warning("MEXC ticker API error: %s", str(raw)[:180])
+        return None
+
+    data = raw.get("data", [])
+    if isinstance(data, dict):
+        data = [data]
+
+    rows: list[tuple[float, str]] = []
+    for item in data:
+        try:
+            raw_symbol = str(item.get("symbol", "")).upper()
+            if not raw_symbol.endswith("_USDT"):
+                continue
+            last_price = float(item.get("lastPrice") or item.get("fairPrice") or 0)
+            amount24 = float(item.get("amount24") or 0)
+            if last_price <= 0 or amount24 <= 0:
+                continue
+            rows.append((amount24, compact_symbol(raw_symbol)))
+        except Exception:
+            continue
+
+    rows.sort(reverse=True, key=lambda x: x[0])
+    symbols = []
+    seen = set()
+    for _, symbol in rows:
+        if symbol in seen:
+            continue
+        seen.add(symbol)
+        symbols.append(symbol)
+        if len(symbols) >= limit:
+            break
+    return symbols or None
+
+
+async def get_symbols_for_scan(session: aiohttp.ClientSession) -> list[str]:
+    if MARKET_DATA_PROVIDER == "mexc" and MEXC_DYNAMIC_TOP_SYMBOLS and not USE_ENV_SYMBOLS:
+        symbols = await fetch_mexc_top_symbols(session, MEXC_SYMBOLS_LIMIT)
+        if symbols:
+            return symbols
+        logging.warning("MEXC dynamic top symbols не получены, использую DEFAULT_MEXC_FUTURES_SYMBOLS")
+    return SYMBOLS[:MEXC_SYMBOLS_LIMIT] if MARKET_DATA_PROVIDER == "mexc" else SYMBOLS
+
+
+async def fetch_mexc_klines(session: aiohttp.ClientSession, symbol: str, interval: str, limit: int) -> Optional[list[dict[str, float]]]:
+    contract_symbol = mexc_symbol(symbol)
+    url = f"{MEXC_API_BASE}/api/v1/contract/kline/{contract_symbol}"
+    end_ts = int(time.time())
+    start_ts = end_ts - interval_seconds(interval) * max(limit, 100)
+    params = {"interval": mexc_interval(interval), "start": str(start_ts), "end": str(end_ts)}
+    async with session.get(url, params=params, timeout=15) as response:
+        if response.status != 200:
+            text = await response.text()
+            logging.warning("MEXC kline HTTP error %s %s: %s", contract_symbol, response.status, text[:160])
+            return None
+        raw = await response.json()
+    if not raw.get("success"):
+        logging.warning("MEXC kline API error %s: %s", contract_symbol, str(raw)[:180])
+        return None
+
+    data = raw.get("data", {})
+    times = data.get("time") or []
+    opens = data.get("open") or []
+    highs = data.get("high") or []
+    lows = data.get("low") or []
+    closes = data.get("close") or []
+    volumes = data.get("vol") or []
+    count = min(len(times), len(opens), len(highs), len(lows), len(closes))
+    if count < 80:
+        return None
+
+    candles: list[dict[str, float]] = []
+    for i in range(max(0, count - limit), count):
+        try:
+            ts = float(times[i]) * 1000
+            candles.append({
+                "open_time": ts,
+                "open": float(opens[i]),
+                "high": float(highs[i]),
+                "low": float(lows[i]),
+                "close": float(closes[i]),
+                "volume": float(volumes[i]) if i < len(volumes) else 0.0,
+                "close_time": ts,
+            })
+        except Exception:
+            continue
+    candles.sort(key=lambda c: c["open_time"])
+    return candles or None
+
 
 def bybit_interval(interval: str) -> str:
     mapping = {
@@ -449,15 +616,16 @@ async def fetch_bybit_klines(session: aiohttp.ClientSession, symbol: str, interv
 
 async def fetch_klines(session: aiohttp.ClientSession, symbol: str, interval: str, limit: int) -> Optional[list[dict[str, float]]]:
     try:
+        if MARKET_DATA_PROVIDER == "mexc":
+            return await fetch_mexc_klines(session, symbol, interval, limit)
         if MARKET_DATA_PROVIDER == "okx":
             return await fetch_okx_klines(session, symbol, interval, limit)
         if MARKET_DATA_PROVIDER == "bybit":
             return await fetch_bybit_klines(session, symbol, interval, limit)
         if MARKET_DATA_PROVIDER == "binance":
             return await fetch_binance_klines(session, symbol, interval, limit)
-        # auto: OKX first, then Bybit, then Binance.
-        # Railway US regions often get blocked by Binance/Bybit; OKX usually works better for public candles.
-        for fetcher in (fetch_okx_klines, fetch_bybit_klines, fetch_binance_klines):
+        # auto: MEXC first, then OKX, then Bybit, then Binance.
+        for fetcher in (fetch_mexc_klines, fetch_okx_klines, fetch_bybit_klines, fetch_binance_klines):
             data = await fetcher(session, symbol, interval, limit)
             if data:
                 return data
@@ -601,12 +769,23 @@ def analyze_candles(symbol: str, candles: list[dict[str, float]]) -> Optional[Si
 async def scan_market_detailed() -> ScanResult:
     result = ScanResult(data_provider=MARKET_DATA_PROVIDER)
     candidates: list[SignalCandidate] = []
-    connector = aiohttp.TCPConnector(limit=10)
+    connector = aiohttp.TCPConnector(limit=max(1, FETCH_CONCURRENCY))
     async with aiohttp.ClientSession(connector=connector) as session:
-        tasks = [fetch_klines(session, symbol, SIGNAL_TIMEFRAME, KLINES_LIMIT) for symbol in SYMBOLS]
+        symbols_to_scan = await get_symbols_for_scan(session)
+        result.total_symbols = len(symbols_to_scan)
+        semaphore = asyncio.Semaphore(max(1, FETCH_CONCURRENCY))
+
+        async def limited_fetch(symbol: str):
+            async with semaphore:
+                data = await fetch_klines(session, symbol, SIGNAL_TIMEFRAME, KLINES_LIMIT)
+                if REQUEST_DELAY_SECONDS > 0:
+                    await asyncio.sleep(REQUEST_DELAY_SECONDS)
+                return data
+
+        tasks = [limited_fetch(symbol) for symbol in symbols_to_scan]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    for symbol, response in zip(SYMBOLS, results):
+    for symbol, response in zip(symbols_to_scan, results):
         if isinstance(response, Exception) or response is None:
             result.failed_symbols += 1
             result.skipped_symbols.append(symbol)
@@ -661,7 +840,7 @@ async def broadcast_signal(bot: Bot, candidate: SignalCandidate) -> tuple[int, i
         return 0, 0
     reasons_text = "\n".join(f"• {reason}" for reason in candidate.reasons) if candidate.reasons else "• технический скоринг выше порога"
     text = structured_signal_text(
-        symbol=candidate.symbol.replace("USDT", "/USDT"),
+        symbol=display_symbol(candidate.symbol),
         side=candidate.side,
         probability=candidate.probability,
         entry=candidate.entry,
@@ -704,7 +883,7 @@ async def auto_signal_worker(bot: Bot) -> None:
     if not AUTO_SIGNALS_ENABLED:
         logging.info("AUTO_SIGNALS_ENABLED=false, авто-сканер выключен")
         return
-    logging.info("Авто-сканер включён: symbols=%s timeframe=%s interval=%ss threshold=%s%% provider=%s", ",".join(SYMBOLS), SIGNAL_TIMEFRAME, SCAN_INTERVAL_SECONDS, MIN_SIGNAL_PROBABILITY, MARKET_DATA_PROVIDER)
+    logging.info("Авто-сканер включён: provider=%s symbols_mode=%s timeframe=%s interval=%ss threshold=%s%%", MARKET_DATA_PROVIDER, "MEXC_TOP_100" if MEXC_DYNAMIC_TOP_SYMBOLS and not USE_ENV_SYMBOLS else ",".join(SYMBOLS), SIGNAL_TIMEFRAME, SCAN_INTERVAL_SECONDS, MIN_SIGNAL_PROBABILITY)
     await asyncio.sleep(8)
     scan_number = 0
     while True:
@@ -795,10 +974,11 @@ async def cmd_status(message: Message) -> None:
         f"Таймфрейм: <b>{html.escape(SIGNAL_TIMEFRAME)}</b>\n"
         f"Интервал скана: <b>{SCAN_INTERVAL_SECONDS} сек.</b>\n"
         f"Cooldown: <b>{SIGNAL_COOLDOWN_MINUTES} мин.</b>\n"
-        f"Источник данных: <b>{html.escape(MARKET_DATA_PROVIDER)}</b>\n"
+        f"Источник данных: <b>{html.escape(MARKET_DATA_PROVIDER.upper())} Futures</b>\n"
         f"Отчёты админу: <b>{'включены' if AUTO_SCAN_REPORTS_TO_ADMINS else 'выключены'}</b>\n"
-        f"Монет: <b>{len(SYMBOLS)}</b>\n"
-        f"Монеты: <code>{html.escape(','.join(SYMBOLS[:60]))}{'...' if len(SYMBOLS) > 60 else ''}</code>\n"
+        f"Режим монет: <b>{'топ ' + str(MEXC_SYMBOLS_LIMIT) + ' MEXC Futures по 24h обороту' if MARKET_DATA_PROVIDER == 'mexc' and MEXC_DYNAMIC_TOP_SYMBOLS and not USE_ENV_SYMBOLS else 'фиксированный список'}</b>\n"
+        f"Фолбэк-монет: <b>{len(SYMBOLS)}</b>\n"
+        f"Фолбэк-список: <code>{html.escape(','.join(SYMBOLS[:40]))}{'...' if len(SYMBOLS) > 40 else ''}</code>\n"
         f"Подписчиков: <b>{len(subscribers)}</b>\n"
         f"Доп. чаты из SIGNAL_CHAT_IDS: <b>{len(SIGNAL_CHAT_IDS)}</b>",
         reply_markup=keyboard,
