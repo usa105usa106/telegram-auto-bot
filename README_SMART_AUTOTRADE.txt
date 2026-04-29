@@ -27,3 +27,17 @@ Railway Variables по-прежнему нужны:
 
 API-ключи можно добавить в самом боте командой /api_set.
 Withdraw/вывод средств для API-ключа не включать.
+
+
+=== LIVE SAFETY UPDATE ===
+
+Добавлена доработка LIVE-режима:
+- биржевые reduce-only conditional SL/TP через CCXT, если поддерживается биржей;
+- fallback-мониторинг по ticker/mark price;
+- синхронизация открытых сделок с биржей через /sync_trades и по расписанию;
+- ручное закрытие /close_trade ID;
+- asyncio.Lock и атомарная запись trades.json;
+- API-ключи по умолчанию только через Railway Variables/.env;
+- DATA_DIR можно направить на Railway Volume.
+
+Подробности смотри в README_LIVE_SAFETY.md.

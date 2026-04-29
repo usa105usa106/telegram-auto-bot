@@ -109,6 +109,14 @@ TRADE_MARGIN_USDT = max(1.0, min(10000.0, TRADE_MARGIN_USDT))
 AUTO_CLOSE_TP_INDEX = int(os.getenv("AUTO_CLOSE_TP_INDEX", "1"))
 AUTO_CLOSE_TP_INDEX = max(1, min(3, AUTO_CLOSE_TP_INDEX))
 
+# LIVE safety settings. Protective orders are created on the exchange where CCXT supports them;
+# the bot still keeps a fallback monitor as a second line of defence.
+USE_EXCHANGE_PROTECTIVE_ORDERS = os.getenv("USE_EXCHANGE_PROTECTIVE_ORDERS", "true").strip().lower() in {"1", "true", "yes", "on"}
+CANCEL_PROTECTIVE_ORDERS_ON_CLOSE = os.getenv("CANCEL_PROTECTIVE_ORDERS_ON_CLOSE", "true").strip().lower() in {"1", "true", "yes", "on"}
+SYNC_POSITIONS_ON_START = os.getenv("SYNC_POSITIONS_ON_START", "true").strip().lower() in {"1", "true", "yes", "on"}
+SYNC_POSITIONS_INTERVAL_SECONDS = max(30, int(os.getenv("SYNC_POSITIONS_INTERVAL_SECONDS", "120")))
+ALLOW_API_KEYS_FILE = os.getenv("ALLOW_API_KEYS_FILE", "true").strip().lower() in {"1", "true", "yes", "on"}
+
 # ---- Умный алгоритм ----
 # OFF по умолчанию. Включается в /settings кнопкой "🧠 Умный алгоритм".
 # Это не ИИ-прогноз и не гарантия прибыли: бот анализирует историю закрытых авто-сделок,
@@ -123,16 +131,21 @@ MAX_ACTIVE_TRADES = int(os.getenv("MAX_ACTIVE_TRADES", "1"))
 MAX_ACTIVE_TRADES = max(1, min(20, MAX_ACTIVE_TRADES))
 TRADE_MONITOR_INTERVAL_SECONDS = int(os.getenv("TRADE_MONITOR_INTERVAL_SECONDS", "20"))
 
-DATA_DIR = Path(__file__).parent / "data"
-DATA_DIR.mkdir(exist_ok=True)
+DATA_DIR = Path(
+    os.getenv("DATA_DIR")
+    or os.getenv("RAILWAY_VOLUME_MOUNT_PATH")
+    or (Path(__file__).parent / "data")
+)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 SUBSCRIBERS_FILE = DATA_DIR / "subscribers.json"
 SENT_SIGNALS_FILE = DATA_DIR / "sent_signals.json"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 API_KEYS_FILE = DATA_DIR / "api_keys.json"
 TRADES_FILE = DATA_DIR / "trades.json"
+TRADES_LOCK = asyncio.Lock()
 
 TIMEFRAME_OPTIONS = ["5m", "15m", "30m", "1h", "4h"]
-PROBABILITY_OPTIONS = [60, 70, 75, 80, 85, 90]
+PROBABILITY_OPTIONS = [60, 70, 75, 80, 85, 90, 95]
 SCAN_INTERVAL_OPTIONS = [120, 300, 600, 900, 1800, 3600]
 EXCHANGE_OPTIONS = ["mexc", "bingx"]
 AUTO_TRADE_MODE_OPTIONS = ["off", "paper", "live"]
@@ -458,7 +471,10 @@ def load_json(path: Path, default: Any) -> Any:
 
 
 def save_json(path: Path, data: Any) -> None:
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp_path, path)
 
 
 apply_runtime_settings(load_runtime_settings())
@@ -486,19 +502,33 @@ def save_sent_signals(data: dict[str, float]) -> None:
 
 
 def load_api_keys() -> dict[str, dict[str, str]]:
-    data = load_json(API_KEYS_FILE, {})
-    if not isinstance(data, dict):
-        data = {}
-    # Railway/env ключи тоже поддерживаются, но не обязательны.
+    data: dict[str, dict[str, str]] = {}
+
+    # Безопасный режим по умолчанию: LIVE-ключи читаются только из Railway Variables/.env.
+    # Файловое хранение можно включить вручную через ALLOW_API_KEYS_FILE=true, если очень нужно.
+    if ALLOW_API_KEYS_FILE:
+        file_data = load_json(API_KEYS_FILE, {})
+        if isinstance(file_data, dict):
+            for exchange, values in file_data.items():
+                if isinstance(values, dict):
+                    data[str(exchange).lower()] = {
+                        "api_key": str(values.get("api_key", "")).strip(),
+                        "api_secret": str(values.get("api_secret", "")).strip(),
+                    }
+
+    # Railway/env ключи имеют приоритет над файлом.
     for exchange in ("mexc", "bingx"):
         key = os.getenv(f"{exchange.upper()}_API_KEY", "").strip()
         secret = os.getenv(f"{exchange.upper()}_API_SECRET", "").strip()
-        if key and secret and exchange not in data:
+        if key and secret:
             data[exchange] = {"api_key": key, "api_secret": secret}
     return data
 
 
 def save_api_keys(data: dict[str, dict[str, str]]) -> None:
+    if not ALLOW_API_KEYS_FILE:
+        # Не сохраняем секреты в filesystem по умолчанию.
+        return
     save_json(API_KEYS_FILE, data)
 
 
@@ -522,6 +552,16 @@ def load_trades() -> list[dict[str, Any]]:
 
 def save_trades(trades: list[dict[str, Any]]) -> None:
     save_json(TRADES_FILE, trades)
+
+
+async def load_trades_locked() -> list[dict[str, Any]]:
+    async with TRADES_LOCK:
+        return load_trades()
+
+
+async def save_trades_locked(trades: list[dict[str, Any]]) -> None:
+    async with TRADES_LOCK:
+        save_trades(trades)
 
 
 def trade_pnl_pct_value(trade: dict[str, Any]) -> Optional[float]:
@@ -685,7 +725,6 @@ def active_trade_for_symbol(symbol: str, exchange: Optional[str] = None) -> Opti
 
 
 def api_status_text() -> str:
-    keys = load_api_keys()
     lines = [
         "<b>🔑 API ключи</b>",
         "",
@@ -694,12 +733,20 @@ def api_status_text() -> str:
         "",
         "Для LIVE-торговли нужны права <b>Read + Trade</b>. <b>Withdraw/вывод средств не включай.</b>",
         "",
-        "Добавление ключей командой:",
-        "<code>/api_set MEXC API_KEY API_SECRET</code>",
-        "<code>/api_set BINGX API_KEY API_SECRET</code>",
+        "Безопасный способ: добавь ключи в Railway Variables:",
+        "<code>MEXC_API_KEY</code>, <code>MEXC_API_SECRET</code>",
+        "<code>BINGX_API_KEY</code>, <code>BINGX_API_SECRET</code>",
         "",
-        "После отправки команды бот попробует удалить сообщение с ключами. Но безопаснее использовать отдельный API-ключ без вывода средств и с минимальными правами.",
+        "Команда /api_set включена по умолчанию, как в старой версии, и сохраняет ключи в data/api_keys.json.",
     ]
+    if ALLOW_API_KEYS_FILE:
+        lines += [
+            "",
+            "⚠️ Файловое хранение ключей включено. Чтобы отключить /api_set, установи ALLOW_API_KEYS_FILE=false.",
+            "Команды:",
+            "<code>/api_set MEXC API_KEY API_SECRET</code>",
+            "<code>/api_clear MEXC</code>",
+        ]
     return "\n".join(lines)
 
 
@@ -712,14 +759,18 @@ def trades_status_text() -> str:
         tp_index = int(t.get("tp_index", 1))
         tps = t.get("take_profits", [])
         tp = tps[tp_index - 1] if len(tps) >= tp_index else None
+        protective = t.get("protective_orders") or {}
+        protective_status = "есть" if protective.get("sl_order_id") or protective.get("tp_order_id") else "fallback"
         lines.append(
             "\n"
-            f"• <b>{html.escape(str(t.get('symbol')))} {html.escape(str(t.get('side')))}</b> "
+            f"• ID <code>{html.escape(str(t.get('id')))}</code> — "
+            f"<b>{html.escape(str(t.get('symbol')))} {html.escape(str(t.get('side')))}</b> "
             f"({html.escape(str(t.get('mode')))}, {html.escape(str(t.get('exchange')))}):\n"
             f"  вход {html.escape(fmt_price(float(t.get('entry', 0))))}, "
             f"SL {html.escape(fmt_price(float(t.get('stop', 0))))}, "
             f"TP{tp_index} {html.escape(fmt_price(float(tp))) if tp else 'n/a'}\n"
-            f"  объём ≈ ${float(t.get('notional_usdt', 0)):g}, amount {html.escape(str(t.get('amount')))}"
+            f"  объём ≈ ${float(t.get('notional_usdt', 0)):g}, amount {html.escape(str(t.get('amount')))}\n"
+            f"  защитные ордера: <b>{html.escape(protective_status)}</b>; ручное закрытие: <code>/close_trade {html.escape(str(t.get('id')))}</code>"
         )
     return "\n".join(lines)
 
@@ -1729,6 +1780,71 @@ async def find_ccxt_market_symbol(exchange, symbol: str) -> str:
     raise ValueError(f"Пара {symbol} не найдена в CCXT markets для {exchange.id}")
 
 
+def order_id_from_response(order: Any) -> str:
+    if isinstance(order, dict):
+        value = order.get("id") or order.get("orderId") or order.get("clientOrderId")
+        if value:
+            return str(value)
+    return ""
+
+
+def order_average_price(order: Any, fallback: float) -> float:
+    if not isinstance(order, dict):
+        return fallback
+    for key in ("average", "avgPrice", "price", "lastTradeTimestamp"):
+        try:
+            value = order.get(key)
+            if value is not None and float(value) > 0 and key != "lastTradeTimestamp":
+                return float(value)
+        except Exception:
+            continue
+    return fallback
+
+
+def safe_amount(value: Any) -> float:
+    try:
+        return abs(float(value or 0))
+    except Exception:
+        return 0.0
+
+
+def position_amount(position: dict[str, Any]) -> float:
+    for key in ("contracts", "contractSize", "size", "positionAmt", "positionAmount"):
+        amount = safe_amount(position.get(key))
+        if amount > 0:
+            return amount
+    info = position.get("info") if isinstance(position.get("info"), dict) else {}
+    for key in ("positionAmt", "positionAmount", "holdVol", "volume", "availableVolume"):
+        amount = safe_amount(info.get(key))
+        if amount > 0:
+            return amount
+    return 0.0
+
+
+def position_side(position: dict[str, Any]) -> str:
+    raw = str(position.get("side") or position.get("positionSide") or "").lower()
+    info = position.get("info") if isinstance(position.get("info"), dict) else {}
+    raw_info = str(info.get("side") or info.get("positionSide") or info.get("holdSide") or "").lower()
+    value = raw or raw_info
+    if "short" in value or value in {"sell", "bear"}:
+        return "SHORT"
+    if "long" in value or value in {"buy", "bull"}:
+        return "LONG"
+    try:
+        signed = float(position.get("contracts") or position.get("size") or info.get("positionAmt") or 0)
+        if signed < 0:
+            return "SHORT"
+        if signed > 0:
+            return "LONG"
+    except Exception:
+        pass
+    return ""
+
+
+def trade_close_side(trade: dict[str, Any]) -> str:
+    return "sell" if str(trade.get("side", "")).upper() == "LONG" else "buy"
+
+
 async def execute_live_order(exchange_name: str, symbol: str, side: str, amount: float, reduce_only: bool = False) -> dict[str, Any]:
     exchange = create_ccxt_exchange(exchange_name)
     try:
@@ -1737,18 +1853,233 @@ async def execute_live_order(exchange_name: str, symbol: str, side: str, amount:
         if amount_precise <= 0:
             raise ValueError("Размер ордера получился 0 после округления биржи")
         order_side = side.lower()
-        params = {"reduceOnly": reduce_only}
+        params = {"reduceOnly": bool(reduce_only)} if reduce_only else {}
         order = await exchange.create_order(market_symbol, "market", order_side, amount_precise, None, params)
         return {
             "market_symbol": market_symbol,
             "amount": amount_precise,
             "order": order,
+            "average_price": order_average_price(order, 0),
         }
     finally:
         try:
             await exchange.close()
         except Exception:
             pass
+
+
+async def fetch_live_last_price(exchange_name: str, symbol: str, known_market_symbol: str = "") -> Optional[float]:
+    exchange = create_ccxt_exchange(exchange_name)
+    try:
+        market_symbol = known_market_symbol or await find_ccxt_market_symbol(exchange, symbol)
+        ticker = await exchange.fetch_ticker(market_symbol)
+        if isinstance(ticker, dict):
+            info = ticker.get("info") if isinstance(ticker.get("info"), dict) else {}
+            for key in ("mark", "markPrice", "last", "close", "bid", "ask", "indexPrice"):
+                try:
+                    value = ticker.get(key)
+                    if value is None:
+                        value = info.get(key)
+                    if value is not None and float(value) > 0:
+                        return float(value)
+                except Exception:
+                    continue
+    finally:
+        try:
+            await exchange.close()
+        except Exception:
+            pass
+    return None
+
+
+async def create_reduce_only_trigger_order(
+    exchange,
+    market_symbol: str,
+    purpose: str,
+    close_side: str,
+    amount: float,
+    trigger_price: float,
+) -> dict[str, Any]:
+    trigger_price_precise = float(exchange.price_to_precision(market_symbol, trigger_price))
+    amount_precise = float(exchange.amount_to_precision(market_symbol, amount))
+    if amount_precise <= 0:
+        raise ValueError("Размер защитного ордера получился 0 после округления биржи")
+
+    # CCXT унифицирует stopLossPrice/takeProfitPrice для условных SL/TP ордеров.
+    # Если биржа не поддерживает конкретный вариант, пробуем следующий формат.
+    if purpose == "sl":
+        attempts = [
+            {"reduceOnly": True, "stopLossPrice": trigger_price_precise},
+            {"reduceOnly": True, "triggerPrice": trigger_price_precise, "stopLossPrice": trigger_price_precise},
+            {"reduceOnly": True, "stopPrice": trigger_price_precise, "triggerPrice": trigger_price_precise},
+        ]
+    else:
+        attempts = [
+            {"reduceOnly": True, "takeProfitPrice": trigger_price_precise},
+            {"reduceOnly": True, "triggerPrice": trigger_price_precise, "takeProfitPrice": trigger_price_precise},
+            {"reduceOnly": True, "stopPrice": trigger_price_precise, "triggerPrice": trigger_price_precise},
+        ]
+
+    last_error: Optional[Exception] = None
+    for params in attempts:
+        try:
+            order = await exchange.create_order(market_symbol, "market", close_side, amount_precise, None, params)
+            if isinstance(order, dict):
+                status = str(order.get("status") or "").lower()
+                filled = safe_amount(order.get("filled"))
+                if status in {"closed", "filled"} or filled >= amount_precise * 0.5:
+                    raise RuntimeError(
+                        "Защитный ордер исполнился сразу. Биржа могла не распознать trigger-параметры; "
+                        "проверь позицию вручную."
+                    )
+                return order
+            return {"raw": order}
+        except Exception as exc:
+            last_error = exc
+            logging.warning("Не удалось поставить %s защитный ордер %s params=%s: %s", purpose, market_symbol, params, exc)
+    raise RuntimeError(f"Не удалось поставить защитный {purpose.upper()} ордер: {last_error}")
+
+
+async def place_exchange_protective_orders(exchange_name: str, trade: dict[str, Any]) -> dict[str, Any]:
+    if not USE_EXCHANGE_PROTECTIVE_ORDERS:
+        return {"mode": "disabled", "error": "USE_EXCHANGE_PROTECTIVE_ORDERS=false"}
+
+    target = trade_target_price(trade)
+    if target is None:
+        return {"mode": "missing_target", "error": "TP target is missing"}
+
+    exchange = create_ccxt_exchange(exchange_name)
+    protective: dict[str, Any] = {
+        "mode": "separate_reduce_only_conditional",
+        "created_at": time.time(),
+        "sl_price": float(trade.get("stop")),
+        "tp_price": float(target),
+    }
+    try:
+        market_symbol = str(trade.get("ccxt_symbol") or await find_ccxt_market_symbol(exchange, str(trade.get("symbol"))))
+        amount = float(trade.get("amount", 0))
+        close_side = trade_close_side(trade)
+
+        sl_order = await create_reduce_only_trigger_order(exchange, market_symbol, "sl", close_side, amount, float(trade.get("stop")))
+        protective["sl_order_id"] = order_id_from_response(sl_order)
+        protective["sl_order"] = sl_order
+
+        tp_order = await create_reduce_only_trigger_order(exchange, market_symbol, "tp", close_side, amount, float(target))
+        protective["tp_order_id"] = order_id_from_response(tp_order)
+        protective["tp_order"] = tp_order
+        protective["ok"] = True
+        return protective
+    except Exception as exc:
+        logging.exception("Не удалось поставить биржевые защитные ордера")
+        protective["ok"] = False
+        protective["error"] = str(exc)
+        return protective
+    finally:
+        try:
+            await exchange.close()
+        except Exception:
+            pass
+
+
+async def cancel_protective_orders(trade: dict[str, Any]) -> list[str]:
+    if not CANCEL_PROTECTIVE_ORDERS_ON_CLOSE:
+        return []
+    protective = trade.get("protective_orders") or {}
+    order_ids = [
+        str(protective.get("sl_order_id") or "").strip(),
+        str(protective.get("tp_order_id") or "").strip(),
+    ]
+    order_ids = [order_id for order_id in order_ids if order_id]
+    if not order_ids:
+        return []
+
+    cancelled: list[str] = []
+    exchange = create_ccxt_exchange(str(trade.get("exchange")))
+    try:
+        market_symbol = str(trade.get("ccxt_symbol") or await find_ccxt_market_symbol(exchange, str(trade.get("symbol"))))
+        for order_id in order_ids:
+            for params in ({"trigger": True}, {"stop": True}, {"tpsl": True}, {}):
+                try:
+                    await exchange.cancel_order(order_id, market_symbol, params)
+                    cancelled.append(order_id)
+                    break
+                except Exception as exc:
+                    logging.debug("Не удалось отменить защитный ордер %s params=%s: %s", order_id, params, exc)
+            await asyncio.sleep(0.05)
+    finally:
+        try:
+            await exchange.close()
+        except Exception:
+            pass
+    return cancelled
+
+
+async def fetch_live_position_for_trade(trade: dict[str, Any]) -> Optional[dict[str, Any]]:
+    exchange = create_ccxt_exchange(str(trade.get("exchange")))
+    try:
+        market_symbol = str(trade.get("ccxt_symbol") or await find_ccxt_market_symbol(exchange, str(trade.get("symbol"))))
+        positions: list[Any] = []
+        try:
+            positions = await exchange.fetch_positions([market_symbol])
+        except Exception:
+            positions = await exchange.fetch_positions()
+        expected_side = str(trade.get("side", "")).upper()
+        for position in positions or []:
+            if not isinstance(position, dict):
+                continue
+            pos_symbol = str(position.get("symbol") or "")
+            info = position.get("info") if isinstance(position.get("info"), dict) else {}
+            raw_symbol = str(info.get("symbol") or info.get("contract") or "")
+            if market_symbol not in {pos_symbol, raw_symbol} and compact_symbol(raw_symbol) != compact_symbol(str(trade.get("symbol"))):
+                continue
+            amount = position_amount(position)
+            if amount <= 0:
+                continue
+            side = position_side(position)
+            if side and expected_side and side != expected_side:
+                continue
+            return position
+    finally:
+        try:
+            await exchange.close()
+        except Exception:
+            pass
+    return None
+
+
+async def ensure_live_protection(bot: Bot, trade: dict[str, Any]) -> None:
+    if str(trade.get("mode")) != "live" or str(trade.get("status")) != "open":
+        return
+    protective = trade.get("protective_orders") or {}
+    if protective.get("ok") and (protective.get("sl_order_id") or protective.get("tp_order_id")):
+        return
+
+    new_protective = await place_exchange_protective_orders(str(trade.get("exchange")), trade)
+    async with TRADES_LOCK:
+        trades = load_trades()
+        for item in trades:
+            if item.get("id") == trade.get("id") and item.get("status") == "open":
+                item["protective_orders"] = new_protective
+                item["protection_checked_at"] = time.time()
+                break
+        save_trades(trades)
+
+    if new_protective.get("ok"):
+        await broadcast_to_admins(
+            bot,
+            "🛡 <b>Защитные ордера выставлены</b>\n"
+            f"Пара: <b>{html.escape(str(trade.get('display_symbol') or trade.get('symbol')))}</b>\n"
+            f"SL: <b>{html.escape(fmt_price(float(new_protective.get('sl_price', 0))))}</b>\n"
+            f"TP: <b>{html.escape(fmt_price(float(new_protective.get('tp_price', 0))))}</b>",
+        )
+    else:
+        await broadcast_to_admins(
+            bot,
+            "⚠️ <b>Биржевые защитные ордера не выставлены</b>\n"
+            f"Пара: <b>{html.escape(str(trade.get('display_symbol') or trade.get('symbol')))}</b>\n"
+            "Бот оставил fallback-мониторинг по ticker/mark price. Проверь API и биржу вручную.\n"
+            f"Ошибка: <code>{html.escape(str(new_protective.get('error', 'unknown')))}</code>",
+        )
 
 
 async def open_autotrade_for_signal(bot: Bot, candidate: SignalCandidate) -> Optional[dict[str, Any]]:
@@ -1758,20 +2089,22 @@ async def open_autotrade_for_signal(bot: Bot, candidate: SignalCandidate) -> Opt
     exchange_value = MARKET_DATA_PROVIDER
     symbol = candidate.symbol
 
-    if active_trade_for_symbol(symbol, exchange_value):
-        await broadcast_to_admins(bot, f"ℹ️ Автоторговля: по {html.escape(display_symbol(symbol))} уже есть открытая сделка, новую не открываю.")
-        return None
-
-    open_trades = get_open_trades()
-    if len(open_trades) >= MAX_ACTIVE_TRADES:
-        await broadcast_to_admins(bot, f"⛔️ Автоторговля: лимит открытых сделок {MAX_ACTIVE_TRADES}, новую не открываю.")
-        return None
+    async with TRADES_LOCK:
+        open_trades = [t for t in load_trades() if t.get("status") == "open"]
+        compact = compact_symbol(symbol)
+        for trade in open_trades:
+            if compact_symbol(str(trade.get("symbol", ""))) == compact and str(trade.get("exchange", "")).lower() == exchange_value:
+                await broadcast_to_admins(bot, f"ℹ️ Автоторговля: по {html.escape(display_symbol(symbol))} уже есть открытая сделка, новую не открываю.")
+                return None
+        if len(open_trades) >= MAX_ACTIVE_TRADES:
+            await broadcast_to_admins(bot, f"⛔️ Автоторговля: лимит открытых сделок {MAX_ACTIVE_TRADES}, новую не открываю.")
+            return None
 
     if AUTO_TRADE_MODE == "live" and not has_api_keys(exchange_value):
         await broadcast_to_admins(
             bot,
             "⛔️ LIVE-автоторговля не открыла сделку: нет API ключей для текущей биржи.\n"
-            "Добавь ключи командой /api_set или переключи режим в PAPER."
+            "Добавь ключи в Railway Variables или переключи режим в PAPER."
         )
         return None
 
@@ -1798,6 +2131,8 @@ async def open_autotrade_for_signal(bot: Bot, candidate: SignalCandidate) -> Opt
         "amount": amount,
         "opened_at": time.time(),
         "open_order_id": "paper",
+        "protective_orders": {},
+        "last_synced_at": None,
     }
 
     try:
@@ -1807,12 +2142,30 @@ async def open_autotrade_for_signal(bot: Bot, candidate: SignalCandidate) -> Opt
             trade["amount"] = result["amount"]
             trade["ccxt_symbol"] = result["market_symbol"]
             trade["open_order_id"] = str((result.get("order") or {}).get("id") or "live")
-        trades = load_trades()
-        trades.append(trade)
-        save_trades(trades)
+            avg = float(result.get("average_price") or 0)
+            if avg > 0:
+                trade["entry"] = avg
+
+            # Сразу после входа ставим биржевые reduce-only conditional SL/TP.
+            trade["protective_orders"] = await place_exchange_protective_orders(exchange_value, trade)
+
+        async with TRADES_LOCK:
+            trades = load_trades()
+            trades.append(trade)
+            save_trades(trades)
+
+        protection_note = ""
+        protective = trade.get("protective_orders") or {}
+        if AUTO_TRADE_MODE == "live":
+            if protective.get("ok"):
+                protection_note = "\nЗащитные ордера: <b>выставлены на бирже</b>"
+            else:
+                protection_note = "\nЗащитные ордера: <b>fallback-мониторинг</b> — проверь биржу вручную"
+
         await broadcast_to_admins(
             bot,
             "💰 <b>Авто-сделка открыта</b>\n"
+            f"ID: <code>{html.escape(trade_id)}</code>\n"
             f"Режим: <b>{html.escape(AUTO_TRADE_MODE.upper())}</b>\n"
             f"Биржа: <b>{html.escape(exchange_label(exchange_value))}</b>\n"
             f"Пара: <b>{html.escape(display_symbol(symbol))}</b>\n"
@@ -1820,6 +2173,7 @@ async def open_autotrade_for_signal(bot: Bot, candidate: SignalCandidate) -> Opt
             f"Объём/маржа лимит: <b>${notional_usdt:g}</b>\n"
             f"Amount: <b>{html.escape(str(trade['amount']))}</b>\n"
             f"Закрытие: <b>SL или TP{AUTO_CLOSE_TP_INDEX}</b>"
+            f"{protection_note}"
         )
         return trade
     except Exception as exc:
@@ -1828,78 +2182,200 @@ async def open_autotrade_for_signal(bot: Bot, candidate: SignalCandidate) -> Opt
         return None
 
 
+async def mark_trade_closed(
+    bot: Bot,
+    trade: dict[str, Any],
+    reason: str,
+    close_price: float,
+    pnl_pct: Optional[float],
+    extra: str = "",
+) -> bool:
+    now = time.time()
+    async with TRADES_LOCK:
+        trades = load_trades()
+        updated = False
+        for item in trades:
+            if item.get("id") == trade.get("id") and item.get("status") in {"open", "closing"}:
+                item["status"] = "closed"
+                item["closed_at"] = now
+                item["close_reason"] = reason
+                item["close_price"] = close_price
+                if pnl_pct is not None:
+                    item["pnl_pct"] = pnl_pct
+                item["last_synced_at"] = now
+                updated = True
+                break
+        if updated:
+            save_trades(trades)
+    if not updated:
+        return False
+
+    pnl_text = "n/a" if pnl_pct is None else fmt_pct(pnl_pct)
+    await broadcast_to_admins(
+        bot,
+        "✅ <b>Авто-сделка закрыта</b>\n"
+        f"Пара: <b>{html.escape(str(trade.get('display_symbol') or trade.get('symbol')))}</b>\n"
+        f"Сторона: <b>{html.escape(str(trade.get('side')))}</b>\n"
+        f"Причина: <b>{html.escape(reason)}</b>\n"
+        f"Цена закрытия: <b>{html.escape(fmt_price(close_price))}</b>\n"
+        f"PnL примерно: <b>{html.escape(pnl_text)}</b>"
+        f"{extra}"
+    )
+    return True
+
+
 async def close_autotrade(bot: Bot, trade: dict[str, Any], reason: str, last_price: float) -> bool:
-    trades = load_trades()
-    found = False
-    for item in trades:
-        if item.get("id") == trade.get("id") and item.get("status") == "open":
-            found = True
-            break
+    async with TRADES_LOCK:
+        trades = load_trades()
+        found = False
+        for item in trades:
+            if item.get("id") == trade.get("id") and item.get("status") == "open":
+                item["status"] = "closing"
+                item["closing_reason"] = reason
+                item["closing_started_at"] = time.time()
+                found = True
+                trade = dict(item)
+                break
+        if found:
+            save_trades(trades)
     if not found:
         return False
 
     try:
+        close_price = float(last_price)
         if str(trade.get("mode")) == "live":
-            close_side = "sell" if str(trade.get("side")).upper() == "LONG" else "buy"
-            await execute_live_order(
-                str(trade.get("exchange")),
-                str(trade.get("symbol")),
-                close_side,
-                float(trade.get("amount", 0)),
-                reduce_only=True,
-            )
+            try:
+                await cancel_protective_orders(trade)
+            except Exception:
+                logging.exception("Не удалось отменить защитные ордера перед закрытием")
 
-        pnl_pct = pct_from_entry(last_price, float(trade.get("entry", last_price)))
+            close_side = trade_close_side(trade)
+            try:
+                result = await execute_live_order(
+                    str(trade.get("exchange")),
+                    str(trade.get("symbol")),
+                    close_side,
+                    float(trade.get("amount", 0)),
+                    reduce_only=True,
+                )
+                if float(result.get("average_price") or 0) > 0:
+                    close_price = float(result.get("average_price"))
+            except Exception as exc:
+                # Если биржа уже закрыла позицию защитным ордером или вручную, не открываем новую.
+                position = await fetch_live_position_for_trade(trade)
+                if position is not None:
+                    raise exc
+                fetched_price = await fetch_live_last_price(str(trade.get("exchange")), str(trade.get("symbol")), str(trade.get("ccxt_symbol") or ""))
+                if fetched_price:
+                    close_price = fetched_price
+                reason = reason + "+SYNC_NO_POSITION"
+
+        pnl_pct = pct_from_entry(close_price, float(trade.get("entry", close_price)))
         if str(trade.get("side")).upper() == "SHORT":
             pnl_pct = -pnl_pct
-
-        now = time.time()
-        for item in trades:
-            if item.get("id") == trade.get("id") and item.get("status") == "open":
-                item["status"] = "closed"
-                item["closed_at"] = now
-                item["close_reason"] = reason
-                item["close_price"] = last_price
-                item["pnl_pct"] = pnl_pct
-                break
-        save_trades(trades)
-        await broadcast_to_admins(
-            bot,
-            "✅ <b>Авто-сделка закрыта</b>\n"
-            f"Пара: <b>{html.escape(str(trade.get('display_symbol') or trade.get('symbol')))}</b>\n"
-            f"Сторона: <b>{html.escape(str(trade.get('side')))}</b>\n"
-            f"Причина: <b>{html.escape(reason)}</b>\n"
-            f"Цена закрытия: <b>{html.escape(fmt_price(last_price))}</b>\n"
-            f"PnL примерно: <b>{html.escape(fmt_pct(pnl_pct))}</b>"
-        )
-        return True
+        return await mark_trade_closed(bot, trade, reason, close_price, pnl_pct)
     except Exception as exc:
         logging.exception("Не удалось закрыть авто-сделку")
+        async with TRADES_LOCK:
+            trades = load_trades()
+            for item in trades:
+                if item.get("id") == trade.get("id") and item.get("status") == "closing":
+                    item["status"] = "open"
+                    item["last_close_error"] = str(exc)
+                    item["last_close_error_at"] = time.time()
+                    break
+            save_trades(trades)
         await broadcast_to_admins(bot, f"⚠️ Не удалось закрыть авто-сделку {html.escape(str(trade.get('symbol')))}: <code>{html.escape(str(exc))}</code>")
         return False
 
 
+async def sync_exchange_positions(bot: Bot) -> None:
+    open_live_trades = [t for t in get_open_trades() if str(t.get("mode")) == "live"]
+    if not open_live_trades:
+        return
+    for trade in open_live_trades:
+        try:
+            position = await fetch_live_position_for_trade(trade)
+            last_price = await fetch_live_last_price(str(trade.get("exchange")), str(trade.get("symbol")), str(trade.get("ccxt_symbol") or ""))
+            now = time.time()
+            if position is None:
+                close_price = float(last_price or trade.get("entry") or 0)
+                pnl_pct = None
+                if close_price > 0:
+                    pnl_pct = pct_from_entry(close_price, float(trade.get("entry", close_price)))
+                    if str(trade.get("side", "")).upper() == "SHORT":
+                        pnl_pct = -pnl_pct
+                await cancel_protective_orders(trade)
+                await mark_trade_closed(bot, trade, "EXCHANGE_SYNC_CLOSED", close_price, pnl_pct, "\nℹ️ Позиция не найдена на бирже — сделка закрыта в учёте бота.")
+                continue
+
+            amount = position_amount(position)
+            async with TRADES_LOCK:
+                trades = load_trades()
+                for item in trades:
+                    if item.get("id") == trade.get("id") and item.get("status") == "open":
+                        item["exchange_position_amount"] = amount
+                        item["last_synced_at"] = now
+                        if last_price:
+                            item["last_exchange_price"] = last_price
+                        break
+                save_trades(trades)
+            await ensure_live_protection(bot, trade)
+        except Exception as exc:
+            logging.exception("Ошибка синхронизации позиции %s", trade.get("id"))
+            async with TRADES_LOCK:
+                trades = load_trades()
+                for item in trades:
+                    if item.get("id") == trade.get("id") and item.get("status") == "open":
+                        item["last_sync_error"] = str(exc)
+                        item["last_sync_error_at"] = time.time()
+                        break
+                save_trades(trades)
+        await asyncio.sleep(0.15)
+
+
 async def trade_monitor_worker(bot: Bot) -> None:
     await asyncio.sleep(15)
+    last_sync_at = 0.0
+    if SYNC_POSITIONS_ON_START:
+        try:
+            await sync_exchange_positions(bot)
+            last_sync_at = time.time()
+        except Exception:
+            logging.exception("Ошибка стартовой синхронизации позиций")
     while True:
         try:
+            now = time.time()
+            if now - last_sync_at >= SYNC_POSITIONS_INTERVAL_SECONDS:
+                await sync_exchange_positions(bot)
+                last_sync_at = now
+
             open_trades = get_open_trades()
             if open_trades:
                 async with aiohttp.ClientSession() as session:
                     for trade in open_trades:
-                        candles = await fetch_klines_for_exchange(
-                            session,
-                            str(trade.get("exchange", MARKET_DATA_PROVIDER)),
-                            str(trade.get("symbol")),
-                            SIGNAL_TIMEFRAME,
-                            100,
-                        )
-                        if not candles:
+                        last_price: Optional[float] = None
+                        if str(trade.get("mode")) == "live":
+                            last_price = await fetch_live_last_price(
+                                str(trade.get("exchange", MARKET_DATA_PROVIDER)),
+                                str(trade.get("symbol")),
+                                str(trade.get("ccxt_symbol") or ""),
+                            )
+                        if last_price is None:
+                            candles = await fetch_klines_for_exchange(
+                                session,
+                                str(trade.get("exchange", MARKET_DATA_PROVIDER)),
+                                str(trade.get("symbol")),
+                                SIGNAL_TIMEFRAME,
+                                3,
+                            )
+                            if candles:
+                                last_price = float(candles[-1]["close"])
+                        if last_price is None:
                             continue
-                        last_price = float(candles[-1]["close"])
-                        reason = trade_exit_reason(trade, last_price)
+                        reason = trade_exit_reason(trade, float(last_price))
                         if reason:
-                            await close_autotrade(bot, trade, reason, last_price)
+                            await close_autotrade(bot, trade, reason, float(last_price))
                         await asyncio.sleep(0.15)
         except Exception:
             logging.exception("Ошибка мониторинга авто-сделок")
@@ -2069,6 +2545,8 @@ async def cmd_help(message: Message) -> None:
             "• /api — API ключи для LIVE-торговли\n"
             "• /margin 10 — маржа/объём на сделку в USDT\n"
             "• /trades — активные авто-сделки\n"
+            "• /close_trade ID — вручную закрыть авто-сделку\n"
+            "• /sync_trades — сверить LIVE-позиции с биржей\n"
             "• отправь BTC, XMR или BTCUSDT — скан одной монеты\n"
             "• /signal — ручной сигнал\n\n"
             "Ручной формат:\n"
@@ -2086,6 +2564,7 @@ async def cmd_help(message: Message) -> None:
         "• /smart — статистика умного алгоритма\n"
         "• /api — API ключи для автоторговли\n"
         "• /trades — активные авто-сделки\n"
+        "• /close_trade ID — ручное закрытие авто-сделки\n"
         "• отправь название монеты, например BTC или XMR, — я просканирую её отдельно\n"
         "• /id — показать Telegram ID"
         f"{admin_help}",
@@ -2124,6 +2603,9 @@ async def cmd_status(message: Message) -> None:
         f"API текущей биржи: <b>{'есть' if has_api_keys(MARKET_DATA_PROVIDER) else 'нет'}</b>\n"
         f"Маржа/объём сделки: <b>${TRADE_MARGIN_USDT:g}</b>\n"
         f"Авто-закрытие: <b>SL или TP{AUTO_CLOSE_TP_INDEX}</b>\n"
+        f"Биржевые защитные ордера: <b>{'включены' if USE_EXCHANGE_PROTECTIVE_ORDERS else 'выключены'}</b>\n"
+        f"Синхронизация позиций: <b>каждые {SYNC_POSITIONS_INTERVAL_SECONDS} сек.</b>\n"
+        f"Хранилище data: <code>{html.escape(str(DATA_DIR))}</code>\n"
         f"Открытых авто-сделок: <b>{len(get_open_trades())}</b> / {MAX_ACTIVE_TRADES}\n"
         f"Отчёты админу: <b>{'включены' if AUTO_SCAN_REPORTS_TO_ADMINS else 'выключены'}</b>\n"
         f"Режим монет: <b>{html.escape(symbols_mode_text())}</b>\n"
@@ -2173,6 +2655,17 @@ async def cmd_api_set(message: Message, command: CommandObject) -> None:
     if not is_admin(message.from_user.id):
         await message.answer("API настройки доступны только админу.")
         return
+    if not ALLOW_API_KEYS_FILE:
+        await message.answer(
+            "🔐 Файловое хранение API-ключей отключено.\n\n"
+            "Добавь ключи в Railway Variables вместо Telegram-команды:\n"
+            "<code>MEXC_API_KEY</code>, <code>MEXC_API_SECRET</code>\n"
+            "<code>BINGX_API_KEY</code>, <code>BINGX_API_SECRET</code>\n\n"
+            "Это безопаснее: секреты не попадут в <code>data/api_keys.json</code>. "
+            "Чтобы вернуть команду /api_set, установи <code>ALLOW_API_KEYS_FILE=true</code>."
+        )
+        return
+
     if not command.args:
         await message.answer(
             "Формат:\n"
@@ -2220,7 +2713,7 @@ async def cmd_api_clear(message: Message, command: CommandObject) -> None:
     exchange = (command.args or MARKET_DATA_PROVIDER).strip().lower()
     if exchange == "all":
         save_api_keys({})
-        await message.answer("🧹 Все API ключи очищены.")
+        await message.answer("🧹 Файловые API ключи очищены. Если ключи заданы в Railway Variables, удали их в Railway Dashboard.")
         return
     if exchange not in EXCHANGE_OPTIONS:
         await message.answer("Формат: <code>/api_clear MEXC</code>, <code>/api_clear BINGX</code> или <code>/api_clear all</code>.")
@@ -2228,7 +2721,7 @@ async def cmd_api_clear(message: Message, command: CommandObject) -> None:
     keys = load_api_keys()
     keys.pop(exchange, None)
     save_api_keys(keys)
-    await message.answer(f"🧹 API ключи для {html.escape(exchange_label(exchange))} очищены.")
+    await message.answer(f"🧹 Файловые API ключи для {html.escape(exchange_label(exchange))} очищены. Railway Variables этой командой не удаляются.")
 
 
 @dp.message(Command("margin"))
@@ -2256,6 +2749,61 @@ async def cmd_trades(message: Message) -> None:
         await message.answer("Список сделок доступен только админу.")
         return
     await message.answer(trades_status_text())
+
+
+@dp.message(Command("sync_trades"))
+async def cmd_sync_trades(message: Message, bot: Bot) -> None:
+    if not is_admin(message.from_user.id):
+        await message.answer("Синхронизация доступна только админу.")
+        return
+    await message.answer("🔄 Сверяю открытые LIVE-сделки с биржей...")
+    try:
+        await sync_exchange_positions(bot)
+    except Exception as exc:
+        logging.exception("Ошибка ручной синхронизации")
+        await message.answer(f"⚠️ Ошибка синхронизации: <code>{html.escape(str(exc))}</code>")
+        return
+    await message.answer("✅ Синхронизация завершена.\n\n" + trades_status_text())
+
+
+@dp.message(Command("close_trade"))
+async def cmd_close_trade(message: Message, command: CommandObject, bot: Bot) -> None:
+    if not is_admin(message.from_user.id):
+        await message.answer("Закрытие сделок доступно только админу.")
+        return
+    arg = (command.args or "").strip()
+    if not arg:
+        await message.answer("Формат: <code>/close_trade ID</code>\nID можно посмотреть в /trades.")
+        return
+    trade_key = arg.split()[0].strip()
+    open_trades = get_open_trades()
+    trade = None
+    for item in open_trades:
+        if str(item.get("id")) == trade_key or compact_symbol(str(item.get("symbol", ""))) == compact_symbol(trade_key):
+            trade = item
+            break
+    if trade is None:
+        await message.answer("Открытая сделка не найдена. Проверь /trades.")
+        return
+
+    last_price = None
+    if str(trade.get("mode")) == "live":
+        last_price = await fetch_live_last_price(str(trade.get("exchange")), str(trade.get("symbol")), str(trade.get("ccxt_symbol") or ""))
+    if last_price is None:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            candles = await fetch_klines_for_exchange(session, str(trade.get("exchange", MARKET_DATA_PROVIDER)), str(trade.get("symbol")), SIGNAL_TIMEFRAME, 3)
+            if candles:
+                last_price = float(candles[-1]["close"])
+    if last_price is None:
+        await message.answer("Не удалось получить текущую цену для закрытия. Попробуй /sync_trades и проверь биржу.")
+        return
+
+    ok = await close_autotrade(bot, trade, "MANUAL", float(last_price))
+    if ok:
+        await message.answer("✅ Команда закрытия выполнена. Проверь биржу и /trades.")
+    else:
+        await message.answer("⚠️ Сделка не была закрыта. Проверь Railway Logs и биржу.")
 
 
 @dp.callback_query(F.data.startswith("settings:"))
@@ -2329,7 +2877,7 @@ async def settings_callback(callback: CallbackQuery) -> None:
             f"Маржа/объём сделки: <b>${TRADE_MARGIN_USDT:g}</b>\n"
             f"Авто-закрытие: <b>SL или TP{AUTO_CLOSE_TP_INDEX}</b>\n"
             f"Открытых сделок: <b>{len(get_open_trades())}</b>\n\n"
-            "OFF — только сигналы. PAPER — тест без ордеров. LIVE — реальные рыночные ордера по API.",
+            "OFF — только сигналы. PAPER — тест без ордеров. LIVE — реальные ордера + биржевые SL/TP где поддерживаются + синхронизация.",
             reply_markup=autotrade_keyboard(),
         )
         await callback.answer()
@@ -2357,7 +2905,7 @@ async def settings_callback(callback: CallbackQuery) -> None:
     if data == "settings:close_tp":
         await message.edit_text(
             f"<b>🎯 Выбери тейк для авто-закрытия</b>\n\nСейчас: <b>TP{AUTO_CLOSE_TP_INDEX}</b>\n\n"
-            "Если цена дойдёт до выбранного TP или до SL, бот закроет всю авто-сделку.",
+            "Для LIVE бот пытается выставить reduce-only conditional SL/TP на бирже и дополнительно контролирует цену по ticker/mark price.",
             reply_markup=close_tp_keyboard(),
         )
         await callback.answer()
@@ -2386,7 +2934,7 @@ async def settings_callback(callback: CallbackQuery) -> None:
         keys.pop(MARKET_DATA_PROVIDER, None)
         save_api_keys(keys)
         await message.edit_text(api_status_text(), reply_markup=api_keyboard())
-        await callback.answer("Ключи текущей биржи очищены")
+        await callback.answer("Файловые ключи очищены; Railway Variables удаляются только в Railway", show_alert=True)
         return
 
     if data.startswith("settings:set_exchange:"):
