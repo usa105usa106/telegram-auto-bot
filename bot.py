@@ -24,6 +24,11 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
+# В Railway должны быть только BOT_TOKEN и ADMIN_IDS.
+# Остальные рабочие настройки имеют безопасные значения по умолчанию,
+# сохраняются в /app/data/settings.json и меняются через Telegram (/settings).
+# Так Railway Variables больше не перетирают порог, интервал, cooldown и другие настройки при рестарте.
+
 
 def parse_id_set(raw: str, allow_negative: bool = False) -> Set[int]:
     result: Set[int] = set()
@@ -38,25 +43,23 @@ def parse_id_set(raw: str, allow_negative: bool = False) -> Set[int]:
 
 
 ADMIN_IDS = parse_id_set(os.getenv("ADMIN_IDS", ""))
-SIGNAL_CHAT_IDS = parse_id_set(os.getenv("SIGNAL_CHAT_IDS", ""), allow_negative=True)
+SIGNAL_CHAT_IDS: Set[int] = set()
 
-MIN_SIGNAL_PROBABILITY = int(os.getenv("MIN_SIGNAL_PROBABILITY", "80"))
-AUTO_SIGNALS_ENABLED = os.getenv("AUTO_SIGNALS_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+MIN_SIGNAL_PROBABILITY = 80
+AUTO_SIGNALS_ENABLED = True
 
 # Биржи: MEXC Futures и BingX Futures. По умолчанию — MEXC,
-# но переключение теперь есть прямо в Telegram через /settings.
-MARKET_DATA_PROVIDER = os.getenv("MARKET_DATA_PROVIDER", "mexc").strip().lower()
-if MARKET_DATA_PROVIDER not in {"mexc", "bingx"}:
-    MARKET_DATA_PROVIDER = "mexc"
+# переключение есть прямо в Telegram через /settings.
+MARKET_DATA_PROVIDER = "mexc"
 
-MEXC_API_BASE = os.getenv("MEXC_API_BASE", "https://api.mexc.com").rstrip("/")
-BINGX_API_BASE = os.getenv("BINGX_API_BASE", "https://open-api.bingx.com").rstrip("/")
+MEXC_API_BASE = "https://api.mexc.com"
+BINGX_API_BASE = "https://open-api.bingx.com"
 
-MEXC_DYNAMIC_TOP_SYMBOLS = os.getenv("MEXC_DYNAMIC_TOP_SYMBOLS", "true").strip().lower() in {"1", "true", "yes", "on"}
-BINGX_DYNAMIC_TOP_SYMBOLS = os.getenv("BINGX_DYNAMIC_TOP_SYMBOLS", "true").strip().lower() in {"1", "true", "yes", "on"}
-MEXC_SYMBOLS_LIMIT = max(1, min(150, int(os.getenv("MEXC_SYMBOLS_LIMIT", "100"))))
-BINGX_SYMBOLS_LIMIT = max(1, min(150, int(os.getenv("BINGX_SYMBOLS_LIMIT", "100"))))
-USE_ENV_SYMBOLS = os.getenv("USE_ENV_SYMBOLS", "false").strip().lower() in {"1", "true", "yes", "on"}
+MEXC_DYNAMIC_TOP_SYMBOLS = True
+BINGX_DYNAMIC_TOP_SYMBOLS = True
+MEXC_SYMBOLS_LIMIT = 100
+BINGX_SYMBOLS_LIMIT = 100
+USE_ENV_SYMBOLS = False
 
 DEFAULT_MEXC_FUTURES_SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT", "DOGEUSDT", "ADAUSDT", "TRXUSDT",
@@ -73,36 +76,36 @@ DEFAULT_MEXC_FUTURES_SYMBOLS = [
     "WOOUSDT", "BLURUSDT", "CKBUSDT", "CELOUSDT", "QTUMUSDT", "KSMUSDT", "ONTUSDT", "WAVESUSDT",
     "1000PEPEUSDT", "1000SHIBUSDT", "1000BONKUSDT", "1000FLOKIUSDT", "1000RATSUSDT", "1000SATSUSDT"
 ]
-_ENV_SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "").split(",") if s.strip()]
-SYMBOLS = _ENV_SYMBOLS if USE_ENV_SYMBOLS and _ENV_SYMBOLS else DEFAULT_MEXC_FUTURES_SYMBOLS
 
-SIGNAL_TIMEFRAME = os.getenv("SIGNAL_TIMEFRAME", "15m").strip()
+SYMBOLS = DEFAULT_MEXC_FUTURES_SYMBOLS
+
+SIGNAL_TIMEFRAME = "15m"
 
 # ---- Фильтр основного тренда ----
 # Когда включено, бот сначала находит сетап на рабочем таймфрейме,
 # затем проверяет старший таймфрейм и пропускает только LONG по бычьему тренду
 # или SHORT по медвежьему тренду. Фильтр применяется и к сигналам, и к автоторговле.
-TREND_FILTER_ENABLED = os.getenv("TREND_FILTER_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
-TREND_TIMEFRAME = os.getenv("TREND_TIMEFRAME", "4h").strip()
-TREND_MIN_SCORE = max(2, min(6, int(os.getenv("TREND_MIN_SCORE", "3"))))
-SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "600"))
-SIGNAL_COOLDOWN_MINUTES = int(os.getenv("SIGNAL_COOLDOWN_MINUTES", "360"))
-MAX_SIGNALS_PER_SCAN = int(os.getenv("MAX_SIGNALS_PER_SCAN", "3"))
-KLINES_LIMIT = int(os.getenv("KLINES_LIMIT", "160"))
-FETCH_CONCURRENCY = max(1, int(os.getenv("FETCH_CONCURRENCY", "1")))
-REQUEST_DELAY_SECONDS = float(os.getenv("REQUEST_DELAY_SECONDS", "0.12"))
+TREND_FILTER_ENABLED = True
+TREND_TIMEFRAME = "4h"
+TREND_MIN_SCORE = 3
+SCAN_INTERVAL_SECONDS = 600
+SIGNAL_COOLDOWN_MINUTES = 360
+MAX_SIGNALS_PER_SCAN = 3
+KLINES_LIMIT = 160
+FETCH_CONCURRENCY = 1
+REQUEST_DELAY_SECONDS = 0.12
 
-BYBIT_API_BASE = os.getenv("BYBIT_API_BASE", "https://api.bybit.com").rstrip("/")
-BINANCE_API_BASE = os.getenv("BINANCE_API_BASE", "https://api.binance.com").rstrip("/")
-OKX_API_BASE = os.getenv("OKX_API_BASE", "https://www.okx.com").rstrip("/")
+BYBIT_API_BASE = "https://api.bybit.com"
+BINANCE_API_BASE = "https://api.binance.com"
+OKX_API_BASE = "https://www.okx.com"
 
-STOP_ATR_MULTIPLIER = float(os.getenv("STOP_ATR_MULTIPLIER", "1.2"))
-MIN_RISK_PCT = float(os.getenv("MIN_RISK_PCT", "0.8"))
+STOP_ATR_MULTIPLIER = 1.2
+MIN_RISK_PCT = 0.8
 
-# This helps you see that the automatic worker is alive. It sends reports to admins only, not subscribers.
-AUTO_SCAN_REPORTS_TO_ADMINS = os.getenv("AUTO_SCAN_REPORTS_TO_ADMINS", "true").strip().lower() in {"1", "true", "yes", "on"}
-AUTO_SCAN_REPORT_EVERY_N_SCANS = max(1, int(os.getenv("AUTO_SCAN_REPORT_EVERY_N_SCANS", "1")))
-TOP_PREVIEW_COUNT = max(1, int(os.getenv("TOP_PREVIEW_COUNT", "5")))
+# Отчёты показывают, что авто-воркер жив. Отправляются только админам.
+AUTO_SCAN_REPORTS_TO_ADMINS = True
+AUTO_SCAN_REPORT_EVERY_N_SCANS = 1
+TOP_PREVIEW_COUNT = 5
 
 # ---- Автоторговля ----
 # По умолчанию выключена. Включается кнопками в /settings.
@@ -110,148 +113,114 @@ TOP_PREVIEW_COUNT = max(1, int(os.getenv("TOP_PREVIEW_COUNT", "5")))
 #   off   — бот только шлёт сигналы
 #   paper — тестовая торговля без реальных ордеров
 #   live  — реальные рыночные ордера через API
-AUTO_TRADE_MODE = os.getenv("AUTO_TRADE_MODE", "off").strip().lower()
-if AUTO_TRADE_MODE not in {"off", "paper", "live"}:
-    AUTO_TRADE_MODE = "off"
-
-TRADE_MARGIN_USDT = float(os.getenv("TRADE_MARGIN_USDT", "5"))
+AUTO_TRADE_MODE = "off"
+TRADE_MARGIN_USDT = 5.0
 TRADE_MARGIN_USDT = max(1.0, min(10000.0, TRADE_MARGIN_USDT))
-AUTO_CLOSE_TP_INDEX = int(os.getenv("AUTO_CLOSE_TP_INDEX", "1"))
+AUTO_CLOSE_TP_INDEX = 1
 AUTO_CLOSE_TP_INDEX = max(1, min(3, AUTO_CLOSE_TP_INDEX))
 
-# LIVE safety settings. Protective orders are created on the exchange where CCXT supports them;
-# the bot still keeps a fallback monitor as a second line of defence.
-USE_EXCHANGE_PROTECTIVE_ORDERS = os.getenv("USE_EXCHANGE_PROTECTIVE_ORDERS", "true").strip().lower() in {"1", "true", "yes", "on"}
-CANCEL_PROTECTIVE_ORDERS_ON_CLOSE = os.getenv("CANCEL_PROTECTIVE_ORDERS_ON_CLOSE", "true").strip().lower() in {"1", "true", "yes", "on"}
-SYNC_POSITIONS_ON_START = os.getenv("SYNC_POSITIONS_ON_START", "true").strip().lower() in {"1", "true", "yes", "on"}
-SYNC_POSITIONS_INTERVAL_SECONDS = max(30, int(os.getenv("SYNC_POSITIONS_INTERVAL_SECONDS", "120")))
-ALLOW_API_KEYS_FILE = os.getenv("ALLOW_API_KEYS_FILE", "true").strip().lower() in {"1", "true", "yes", "on"}
+# LIVE safety settings.
+USE_EXCHANGE_PROTECTIVE_ORDERS = True
+CANCEL_PROTECTIVE_ORDERS_ON_CLOSE = True
+SYNC_POSITIONS_ON_START = True
+SYNC_POSITIONS_INTERVAL_SECONDS = 120
+ALLOW_API_KEYS_FILE = True
 
 # ---- Умный алгоритм ----
-# OFF по умолчанию. Включается в /settings кнопкой "🧠 Умный алгоритм".
-# Это не ИИ-прогноз и не гарантия прибыли: бот анализирует историю закрытых авто-сделок,
-# штрафует убыточные связки символ/сторона и становится строже после серии минусов.
-SMART_ALGORITHM_ENABLED = os.getenv("SMART_ALGORITHM_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
-SMART_LOOKBACK_TRADES = max(5, min(200, int(os.getenv("SMART_LOOKBACK_TRADES", "30"))))
-SMART_MIN_HISTORY_TRADES = max(3, min(50, int(os.getenv("SMART_MIN_HISTORY_TRADES", "5"))))
-SMART_LOSS_STREAK_TRIGGER = max(2, min(10, int(os.getenv("SMART_LOSS_STREAK_TRIGGER", "3"))))
-SMART_ADJUSTMENT_CAP = max(3, min(30, int(os.getenv("SMART_ADJUSTMENT_CAP", "15"))))
+SMART_ALGORITHM_ENABLED = False
+SMART_LOOKBACK_TRADES = 30
+SMART_MIN_HISTORY_TRADES = 5
+SMART_LOSS_STREAK_TRIGGER = 3
+SMART_ADJUSTMENT_CAP = 15
 
 # ---- Нейро-оптимизатор алгоритмов ----
-# Это не гарантия прибыли. Модуль перебирает несколько алгоритмических профилей
-# на свежей истории свечей, выбирает лучший по winrate/profit factor/avg PnL
-# и пропускает сигнал/сделку только если выбранный профиль показывает положительное преимущество.
-NEURAL_OPTIMIZER_ENABLED = os.getenv(
-    "NEURAL_OPTIMIZER_ENABLED",
-    os.getenv("AI_OPTIMIZER_ENABLED", "false"),
-).strip().lower() in {"1", "true", "yes", "on"}
-NEURAL_OPTIMIZER_STRICT_MODE = os.getenv("NEURAL_OPTIMIZER_STRICT_MODE", "true").strip().lower() in {"1", "true", "yes", "on"}
-NEURAL_OPTIMIZER_MIN_TRADES = max(3, min(50, int(os.getenv("NEURAL_OPTIMIZER_MIN_TRADES", "6"))))
-NEURAL_OPTIMIZER_MIN_WIN_RATE = max(0.0, min(1.0, float(os.getenv("NEURAL_OPTIMIZER_MIN_WIN_RATE", "0.55"))))
-NEURAL_OPTIMIZER_MIN_PROFIT_FACTOR = max(0.1, min(10.0, float(os.getenv("NEURAL_OPTIMIZER_MIN_PROFIT_FACTOR", "1.15"))))
-NEURAL_OPTIMIZER_MIN_AVG_PNL = float(os.getenv("NEURAL_OPTIMIZER_MIN_AVG_PNL", "0.05"))
-NEURAL_OPTIMIZER_HORIZON_CANDLES = max(3, min(80, int(os.getenv("NEURAL_OPTIMIZER_HORIZON_CANDLES", "24"))))
-NEURAL_OPTIMIZER_PROBABILITY_BONUS = max(0, min(15, int(os.getenv("NEURAL_OPTIMIZER_PROBABILITY_BONUS", "5"))))
-NEURAL_OPTIMIZER_MAX_PROFILES = max(3, min(20, int(os.getenv("NEURAL_OPTIMIZER_MAX_PROFILES", "10"))))
+NEURAL_OPTIMIZER_ENABLED = False
+NEURAL_OPTIMIZER_STRICT_MODE = True
+NEURAL_OPTIMIZER_MIN_TRADES = 6
+NEURAL_OPTIMIZER_MIN_WIN_RATE = 0.55
+NEURAL_OPTIMIZER_MIN_PROFIT_FACTOR = 1.15
+NEURAL_OPTIMIZER_MIN_AVG_PNL = 0.05
+NEURAL_OPTIMIZER_HORIZON_CANDLES = 24
+NEURAL_OPTIMIZER_PROBABILITY_BONUS = 5
+NEURAL_OPTIMIZER_MAX_PROFILES = 10
 
 # ---- Супер сделка ----
-# Когда включено, бот отправляет сигналы и открывает авто-сделки только при максимальных условиях:
-# базовый сигнал почти максимальный, тренд строго +7 для LONG или -7 для SHORT, итоговая проходимость 97-99%.
-# В Telegram нельзя реально покрасить текст сообщения в красный цвет, поэтому супер-сигналы выделяются красными эмодзи 🔴.
-SUPER_DEAL_ENABLED = os.getenv("SUPER_DEAL_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
-SUPER_DEAL_MIN_PROBABILITY = max(97, min(99, int(os.getenv("SUPER_DEAL_MIN_PROBABILITY", "97"))))
-SUPER_DEAL_RAW_PROBABILITY_MIN = max(90, min(95, int(os.getenv("SUPER_DEAL_RAW_PROBABILITY_MIN", "95"))))
-SUPER_DEAL_TREND_SCORE_ABS = max(3, min(7, int(os.getenv("SUPER_DEAL_TREND_SCORE_ABS", "7"))))
+SUPER_DEAL_ENABLED = False
+SUPER_DEAL_MIN_PROBABILITY = 97
+SUPER_DEAL_RAW_PROBABILITY_MIN = 95
+SUPER_DEAL_TREND_SCORE_ABS = 7
 
 # ---- Только BTC/ETH ----
-# OFF по умолчанию. Когда включено, бот сканирует только BTCUSDT и ETHUSDT
-# и применяет отдельный строгий профиль подтверждений по нескольким таймфреймам.
-BTC_ETH_ONLY_MODE_ENABLED = os.getenv("BTC_ETH_ONLY_MODE_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+BTC_ETH_ONLY_MODE_ENABLED = False
 BTC_ETH_ONLY_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
-BTC_ETH_ONLY_MIN_PROBABILITY = max(80, min(95, int(os.getenv("BTC_ETH_ONLY_MIN_PROBABILITY", "90"))))
-BTC_ETH_ONLY_TREND_SCORE_ABS = max(3, min(7, int(os.getenv("BTC_ETH_ONLY_TREND_SCORE_ABS", "5"))))
-BTC_ETH_ONLY_MIN_TF_CONFIRMATIONS = max(1, min(4, int(os.getenv("BTC_ETH_ONLY_MIN_TF_CONFIRMATIONS", "2"))))
-BTC_ETH_ONLY_MIN_CONFIRMATION_SCORE = max(4, min(8, int(os.getenv("BTC_ETH_ONLY_MIN_CONFIRMATION_SCORE", "5"))))
-BTC_ETH_ONLY_MIN_VOLUME_RATIO = max(0.5, min(5.0, float(os.getenv("BTC_ETH_ONLY_MIN_VOLUME_RATIO", "1.05"))))
-BTC_ETH_ONLY_MIN_ATR_PCT = max(0.0, float(os.getenv("BTC_ETH_ONLY_MIN_ATR_PCT", "0.05")))
-BTC_ETH_ONLY_MAX_ATR_PCT = max(BTC_ETH_ONLY_MIN_ATR_PCT + 0.01, float(os.getenv("BTC_ETH_ONLY_MAX_ATR_PCT", "4.0")))
-BTC_ETH_ONLY_MAX_ENTRY_ATR_DISTANCE = max(0.2, min(5.0, float(os.getenv("BTC_ETH_ONLY_MAX_ENTRY_ATR_DISTANCE", "1.6"))))
-_ALLOWED_BTC_ETH_CONFIRMATION_TIMEFRAMES = {"15m", "30m", "1h", "4h", "8h", "1d"}
-_ENV_BTC_ETH_CONFIRMATION_TIMEFRAMES = [
-    item.strip()
-    for item in os.getenv("BTC_ETH_CONFIRMATION_TIMEFRAMES", "1h,4h").split(",")
-    if item.strip()
-]
-BTC_ETH_CONFIRMATION_TIMEFRAMES = [
-    tf for tf in _ENV_BTC_ETH_CONFIRMATION_TIMEFRAMES
-    if tf in _ALLOWED_BTC_ETH_CONFIRMATION_TIMEFRAMES
-] or ["1h", "4h"]
+BTC_ETH_ONLY_MIN_PROBABILITY = 90
+BTC_ETH_ONLY_TREND_SCORE_ABS = 5
+BTC_ETH_ONLY_MIN_TF_CONFIRMATIONS = 2
+BTC_ETH_ONLY_MIN_CONFIRMATION_SCORE = 5
+BTC_ETH_ONLY_MIN_VOLUME_RATIO = 1.05
+BTC_ETH_ONLY_MIN_ATR_PCT = 0.05
+BTC_ETH_ONLY_MAX_ATR_PCT = 4.0
+BTC_ETH_ONLY_MAX_ENTRY_ATR_DISTANCE = 1.6
+BTC_ETH_CONFIRMATION_TIMEFRAMES = ["1h", "4h"]
 
-# ---- Наклонные уровни ----
-# OFF по умолчанию. Когда включено, бот пропускает сигнал/автосделку только если
-# найден качественный наклонный уровень: восходящая поддержка для LONG или
-# нисходящее сопротивление для SHORT, рядом с текущей ценой и по направлению тренда.
-SLOPE_LEVELS_ENABLED = os.getenv("SLOPE_LEVELS_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
-SLOPE_LEVEL_MIN_BASE_PROBABILITY = max(60, min(95, int(os.getenv("SLOPE_LEVEL_MIN_BASE_PROBABILITY", "75"))))
-SLOPE_LEVEL_MIN_LEVEL_PROBABILITY = max(70, min(99, int(os.getenv("SLOPE_LEVEL_MIN_LEVEL_PROBABILITY", "85"))))
-SLOPE_LEVEL_PRIORITY_PROBABILITY = max(SLOPE_LEVEL_MIN_LEVEL_PROBABILITY, min(99, int(os.getenv("SLOPE_LEVEL_PRIORITY_PROBABILITY", "98"))))
-SLOPE_LEVEL_LOOKBACK_CANDLES = max(40, min(240, int(os.getenv("SLOPE_LEVEL_LOOKBACK_CANDLES", "120"))))
-SLOPE_LEVEL_CHART_CANDLES = max(30, min(160, int(os.getenv("SLOPE_LEVEL_CHART_CANDLES", "90"))))
-SLOPE_LEVEL_PIVOT_WINDOW = max(2, min(8, int(os.getenv("SLOPE_LEVEL_PIVOT_WINDOW", "3"))))
-SLOPE_LEVEL_MIN_TOUCHES = max(2, min(8, int(os.getenv("SLOPE_LEVEL_MIN_TOUCHES", "3"))))
-SLOPE_LEVEL_TOUCH_ATR_TOLERANCE = max(0.10, min(2.0, float(os.getenv("SLOPE_LEVEL_TOUCH_ATR_TOLERANCE", "0.45"))))
-SLOPE_LEVEL_MAX_ENTRY_ATR_DISTANCE = max(0.10, min(3.0, float(os.getenv("SLOPE_LEVEL_MAX_ENTRY_ATR_DISTANCE", "0.85"))))
-SLOPE_LEVEL_MIN_SLOPE_PCT_PER_CANDLE = max(0.0, min(0.2, float(os.getenv("SLOPE_LEVEL_MIN_SLOPE_PCT_PER_CANDLE", "0.003"))))
-SLOPE_LEVEL_TREND_SCORE_ABS = max(2, min(7, int(os.getenv("SLOPE_LEVEL_TREND_SCORE_ABS", "4"))))
-SLOPE_LEVEL_PROBABILITY_BONUS = max(0, min(20, int(os.getenv("SLOPE_LEVEL_PROBABILITY_BONUS", "8"))))
-SLOPE_LEVEL_SEND_CHARTS = os.getenv("SLOPE_LEVEL_SEND_CHARTS", "true").strip().lower() in {"1", "true", "yes", "on"}
+# ---- Наклонные уровни / slope levels ----
+SLOPE_LEVELS_ENABLED = False
+SLOPE_LEVEL_MIN_BASE_PROBABILITY = 75
+SLOPE_LEVEL_MIN_LEVEL_PROBABILITY = 85
+SLOPE_LEVEL_PRIORITY_PROBABILITY = 98
+SLOPE_LEVEL_LOOKBACK_CANDLES = 120
+SLOPE_LEVEL_CHART_CANDLES = 90
+SLOPE_LEVEL_PIVOT_WINDOW = 3
+SLOPE_LEVEL_MIN_TOUCHES = 3
+SLOPE_LEVEL_TOUCH_ATR_TOLERANCE = 0.45
+SLOPE_LEVEL_MAX_ENTRY_ATR_DISTANCE = 0.85
+SLOPE_LEVEL_MIN_SLOPE_PCT_PER_CANDLE = 0.003
+SLOPE_LEVEL_TREND_SCORE_ABS = 4
+SLOPE_LEVEL_PROBABILITY_BONUS = 8
+SLOPE_LEVEL_SEND_CHARTS = True
 
 # ---- Улучшения торговли ----
-# Master-переключатель. OFF = бот работает как раньше. ON = включаются дополнительные
-# защитные фильтры, риск-движок, частичные тейки, breakeven, лимиты убытков, panic и расширенная статистика.
-TRADING_IMPROVEMENTS_ENABLED = os.getenv("TRADING_IMPROVEMENTS_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
-ACCOUNT_EQUITY_USDT = max(1.0, float(os.getenv("ACCOUNT_EQUITY_USDT", "100")))
-RISK_PER_TRADE_PERCENT = max(0.05, min(10.0, float(os.getenv("RISK_PER_TRADE_PERCENT", "0.5"))))
-MAX_POSITION_NOTIONAL_USDT = max(1.0, float(os.getenv("MAX_POSITION_NOTIONAL_USDT", str(TRADE_MARGIN_USDT))))
-MAX_DAILY_LOSS_PERCENT = max(0.1, min(50.0, float(os.getenv("MAX_DAILY_LOSS_PERCENT", "2"))))
-MAX_WEEKLY_LOSS_PERCENT = max(0.1, min(80.0, float(os.getenv("MAX_WEEKLY_LOSS_PERCENT", "5"))))
-MAX_CONSECUTIVE_LOSSES = max(1, min(20, int(os.getenv("MAX_CONSECUTIVE_LOSSES", "3"))))
-PAUSE_AFTER_LOSS_STREAK_HOURS = max(1, min(168, int(os.getenv("PAUSE_AFTER_LOSS_STREAK_HOURS", "12"))))
-STRICT_PROTECTION_CHECK_ENABLED = os.getenv("STRICT_PROTECTION_CHECK_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
-PARTIAL_TP_ENABLED = os.getenv("PARTIAL_TP_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
-TP1_CLOSE_PERCENT = max(1, min(98, int(os.getenv("TP1_CLOSE_PERCENT", "40"))))
-TP2_CLOSE_PERCENT = max(1, min(98, int(os.getenv("TP2_CLOSE_PERCENT", "30"))))
-TP3_CLOSE_PERCENT = max(1, min(100, int(os.getenv("TP3_CLOSE_PERCENT", "30"))))
-MOVE_SL_TO_BREAKEVEN_AFTER_TP1 = os.getenv("MOVE_SL_TO_BREAKEVEN_AFTER_TP1", "true").strip().lower() in {"1", "true", "yes", "on"}
-BREAKEVEN_OFFSET_PCT = max(0.0, min(2.0, float(os.getenv("BREAKEVEN_OFFSET_PCT", "0.03"))))
-LIQUIDITY_FILTER_ENABLED = os.getenv("LIQUIDITY_FILTER_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
-MAX_SPREAD_PCT = max(0.01, min(5.0, float(os.getenv("MAX_SPREAD_PCT", "0.15"))))
-MIN_LAST_CANDLE_VOLUME_USDT = max(0.0, float(os.getenv("MIN_LAST_CANDLE_VOLUME_USDT", "10000")))
-MIN_AVG_CANDLE_VOLUME_USDT = max(0.0, float(os.getenv("MIN_AVG_CANDLE_VOLUME_USDT", "8000")))
-MIN_24H_QUOTE_VOLUME_USDT = max(0.0, float(os.getenv("MIN_24H_QUOTE_VOLUME_USDT", "500000")))
-MIN_ATR_PCT = max(0.0, float(os.getenv("MIN_ATR_PCT", "0.08")))
-MAX_ATR_PCT = max(MIN_ATR_PCT + 0.01, float(os.getenv("MAX_ATR_PCT", "8")))
-COIN_RATING_FILTER_ENABLED = os.getenv("COIN_RATING_FILTER_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
-SYMBOL_RATING_MIN_TRADES = max(2, min(100, int(os.getenv("SYMBOL_RATING_MIN_TRADES", "5"))))
-MIN_SYMBOL_WIN_RATE = max(0.0, min(1.0, float(os.getenv("MIN_SYMBOL_WIN_RATE", "0.55"))))
-MIN_SYMBOL_PROFIT_FACTOR = max(0.1, min(10.0, float(os.getenv("MIN_SYMBOL_PROFIT_FACTOR", "1.1"))))
-CORRELATION_FILTER_ENABLED = os.getenv("CORRELATION_FILTER_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
-MAX_SAME_DIRECTION_TRADES = max(1, min(10, int(os.getenv("MAX_SAME_DIRECTION_TRADES", "1"))))
-MAX_ALT_TRADES = max(1, min(20, int(os.getenv("MAX_ALT_TRADES", "2"))))
-MARKET_REGIME_FILTER_ENABLED = os.getenv("MARKET_REGIME_FILTER_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
-MAX_PUMP_CANDLE_PCT = max(0.5, min(50.0, float(os.getenv("MAX_PUMP_CANDLE_PCT", "6"))))
-HIGH_VOL_POSITION_FACTOR = max(0.1, min(1.0, float(os.getenv("HIGH_VOL_POSITION_FACTOR", "0.5"))))
-WALK_FORWARD_OPTIMIZER_ENABLED = os.getenv("WALK_FORWARD_OPTIMIZER_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
-WALK_FORWARD_TRAIN_RATIO = max(0.5, min(0.85, float(os.getenv("WALK_FORWARD_TRAIN_RATIO", "0.7"))))
-WALK_FORWARD_MIN_TEST_TRADES = max(1, min(30, int(os.getenv("WALK_FORWARD_MIN_TEST_TRADES", "2"))))
+TRADING_IMPROVEMENTS_ENABLED = False
+ACCOUNT_EQUITY_USDT = 100.0
+RISK_PER_TRADE_PERCENT = 0.5
+MAX_POSITION_NOTIONAL_USDT = TRADE_MARGIN_USDT
+MAX_DAILY_LOSS_PERCENT = 2.0
+MAX_WEEKLY_LOSS_PERCENT = 5.0
+MAX_CONSECUTIVE_LOSSES = 3
+PAUSE_AFTER_LOSS_STREAK_HOURS = 12
+STRICT_PROTECTION_CHECK_ENABLED = True
+PARTIAL_TP_ENABLED = True
+TP1_CLOSE_PERCENT = 40
+TP2_CLOSE_PERCENT = 30
+TP3_CLOSE_PERCENT = 30
+MOVE_SL_TO_BREAKEVEN_AFTER_TP1 = True
+BREAKEVEN_OFFSET_PCT = 0.03
+LIQUIDITY_FILTER_ENABLED = True
+MAX_SPREAD_PCT = 0.15
+MIN_LAST_CANDLE_VOLUME_USDT = 10000.0
+MIN_AVG_CANDLE_VOLUME_USDT = 8000.0
+MIN_24H_QUOTE_VOLUME_USDT = 500000.0
+MIN_ATR_PCT = 0.08
+MAX_ATR_PCT = 8.0
+COIN_RATING_FILTER_ENABLED = True
+SYMBOL_RATING_MIN_TRADES = 5
+MIN_SYMBOL_WIN_RATE = 0.55
+MIN_SYMBOL_PROFIT_FACTOR = 1.1
+CORRELATION_FILTER_ENABLED = True
+MAX_SAME_DIRECTION_TRADES = 1
+MAX_ALT_TRADES = 2
+MARKET_REGIME_FILTER_ENABLED = True
+MAX_PUMP_CANDLE_PCT = 6.0
+HIGH_VOL_POSITION_FACTOR = 0.5
+WALK_FORWARD_OPTIMIZER_ENABLED = True
+WALK_FORWARD_TRAIN_RATIO = 0.7
+WALK_FORWARD_MIN_TEST_TRADES = 2
 
-MAX_ACTIVE_TRADES = int(os.getenv("MAX_ACTIVE_TRADES", "1"))
+MAX_ACTIVE_TRADES = 1
 MAX_ACTIVE_TRADES = max(1, min(20, MAX_ACTIVE_TRADES))
-TRADE_MONITOR_INTERVAL_SECONDS = int(os.getenv("TRADE_MONITOR_INTERVAL_SECONDS", "20"))
-
+TRADE_MONITOR_INTERVAL_SECONDS = 20
 DATA_DIR = Path(
-    os.getenv("DATA_DIR")
-    or os.getenv("RAILWAY_VOLUME_MOUNT_PATH")
+    os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
     or (Path(__file__).parent / "data")
 )
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -270,6 +239,8 @@ if TREND_TIMEFRAME not in TREND_TIMEFRAME_OPTIONS:
     TREND_TIMEFRAME = "4h"
 PROBABILITY_OPTIONS = [60, 70, 75, 80, 85, 90, 95]
 SCAN_INTERVAL_OPTIONS = [120, 300, 600, 900, 1800, 3600]
+COOLDOWN_OPTIONS = [60, 120, 180, 360, 720, 1440]
+MAX_SIGNALS_OPTIONS = [1, 2, 3, 5, 10]
 EXCHANGE_OPTIONS = ["mexc", "bingx"]
 AUTO_TRADE_MODE_OPTIONS = ["off", "paper", "live"]
 TRADE_MARGIN_OPTIONS = [5, 10, 20, 50, 100, 250]
@@ -282,11 +253,14 @@ def load_runtime_settings() -> dict[str, Any]:
 
 def save_runtime_settings() -> None:
     save_json(SETTINGS_FILE, {
+        "AUTO_SIGNALS_ENABLED": AUTO_SIGNALS_ENABLED,
         "MIN_SIGNAL_PROBABILITY": MIN_SIGNAL_PROBABILITY,
         "SIGNAL_TIMEFRAME": SIGNAL_TIMEFRAME,
         "TREND_FILTER_ENABLED": TREND_FILTER_ENABLED,
         "TREND_TIMEFRAME": TREND_TIMEFRAME,
         "SCAN_INTERVAL_SECONDS": SCAN_INTERVAL_SECONDS,
+        "SIGNAL_COOLDOWN_MINUTES": SIGNAL_COOLDOWN_MINUTES,
+        "MAX_SIGNALS_PER_SCAN": MAX_SIGNALS_PER_SCAN,
         "MARKET_DATA_PROVIDER": MARKET_DATA_PROVIDER,
         "AUTO_TRADE_MODE": AUTO_TRADE_MODE,
         "TRADE_MARGIN_USDT": TRADE_MARGIN_USDT,
@@ -301,10 +275,17 @@ def save_runtime_settings() -> None:
 
 
 def apply_runtime_settings(settings: dict[str, Any]) -> None:
-    global MIN_SIGNAL_PROBABILITY, SIGNAL_TIMEFRAME, SCAN_INTERVAL_SECONDS, MARKET_DATA_PROVIDER
+    global AUTO_SIGNALS_ENABLED, MIN_SIGNAL_PROBABILITY, SIGNAL_TIMEFRAME, SCAN_INTERVAL_SECONDS, SIGNAL_COOLDOWN_MINUTES, MAX_SIGNALS_PER_SCAN, MARKET_DATA_PROVIDER
     global AUTO_TRADE_MODE, TRADE_MARGIN_USDT, AUTO_CLOSE_TP_INDEX, SMART_ALGORITHM_ENABLED
     global NEURAL_OPTIMIZER_ENABLED, SUPER_DEAL_ENABLED, BTC_ETH_ONLY_MODE_ENABLED, SLOPE_LEVELS_ENABLED, TRADING_IMPROVEMENTS_ENABLED
     global TREND_FILTER_ENABLED, TREND_TIMEFRAME
+
+    auto_raw = settings.get("AUTO_SIGNALS_ENABLED", AUTO_SIGNALS_ENABLED)
+    if isinstance(auto_raw, bool):
+        AUTO_SIGNALS_ENABLED = auto_raw
+    else:
+        AUTO_SIGNALS_ENABLED = str(auto_raw).strip().lower() in {"1", "true", "yes", "on"}
+
     try:
         probability = int(settings.get("MIN_SIGNAL_PROBABILITY", MIN_SIGNAL_PROBABILITY))
         MIN_SIGNAL_PROBABILITY = max(1, min(100, probability))
@@ -328,6 +309,18 @@ def apply_runtime_settings(settings: dict[str, Any]) -> None:
     try:
         interval = int(settings.get("SCAN_INTERVAL_SECONDS", SCAN_INTERVAL_SECONDS))
         SCAN_INTERVAL_SECONDS = max(30, min(86400, interval))
+    except Exception:
+        pass
+
+    try:
+        cooldown = int(settings.get("SIGNAL_COOLDOWN_MINUTES", SIGNAL_COOLDOWN_MINUTES))
+        SIGNAL_COOLDOWN_MINUTES = max(1, min(10080, cooldown))
+    except Exception:
+        pass
+
+    try:
+        max_signals = int(settings.get("MAX_SIGNALS_PER_SCAN", MAX_SIGNALS_PER_SCAN))
+        MAX_SIGNALS_PER_SCAN = max(1, min(50, max_signals))
     except Exception:
         pass
 
@@ -479,13 +472,20 @@ def trading_improvements_label() -> str:
     return "OFF — прежний режим без дополнительных улучшений"
 
 
+def auto_signals_label() -> str:
+    return "ON — авто-скан отправляет сигналы" if AUTO_SIGNALS_ENABLED else "OFF — авто-скан выключен"
+
+
 def settings_menu_text() -> str:
     return (
         "<b>⚙️ Настройки авто-бота</b>\n\n"
+        f"Авто-сигналы: <b>{html.escape(auto_signals_label())}</b>\n"
         f"Биржа: <b>{html.escape(exchange_label())}</b>\n"
         f"Таймфрейм: <b>{html.escape(SIGNAL_TIMEFRAME)}</b>\n"
         f"Проходимость: <b>{MIN_SIGNAL_PROBABILITY}%</b>\n"
         f"Интервал скана: <b>{human_interval(SCAN_INTERVAL_SECONDS)}</b>\n"
+        f"Cooldown: <b>{human_interval(SIGNAL_COOLDOWN_MINUTES * 60)}</b>\n"
+        f"Макс. сигналов за скан: <b>{MAX_SIGNALS_PER_SCAN}</b>\n"
         f"Умный алгоритм: <b>{html.escape(smart_algorithm_label())}</b>\n"
         f"Нейросети: <b>{html.escape(neural_optimizer_label())}</b>\n"
         f"AI-статус: <b>{html.escape(neural_optimizer_stats_text())}</b>\n"
@@ -504,12 +504,17 @@ def settings_menu_text() -> str:
 
 def settings_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🟢 Авто-сигналы", callback_data="settings:auto_signals")],
         [InlineKeyboardButton(text="🏦 Биржа", callback_data="settings:exchange")],
         [
             InlineKeyboardButton(text="⏱ Таймфрейм", callback_data="settings:timeframe"),
             InlineKeyboardButton(text="🎯 Проходимость", callback_data="settings:probability"),
         ],
-        [InlineKeyboardButton(text="🔁 Интервал скана", callback_data="settings:interval")],
+        [
+            InlineKeyboardButton(text="🔁 Интервал скана", callback_data="settings:interval"),
+            InlineKeyboardButton(text="🧊 Cooldown", callback_data="settings:cooldown"),
+        ],
+        [InlineKeyboardButton(text="📤 Макс. сигналов", callback_data="settings:max_signals")],
         [InlineKeyboardButton(text="🧠 Умный алгоритм", callback_data="settings:smart")],
         [InlineKeyboardButton(text="🤖 Нейросети", callback_data="settings:neural")],
         [InlineKeyboardButton(text="🧭 Фильтр тренда", callback_data="settings:trend")],
@@ -560,6 +565,50 @@ def interval_keyboard() -> InlineKeyboardMarkup:
                 callback_data=f"settings:set_interval:{value}",
             )
             for value in SCAN_INTERVAL_OPTIONS[i:i + 2]
+        ])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def auto_signals_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text=("✅ " if not AUTO_SIGNALS_ENABLED else "") + "OFF",
+                callback_data="settings:set_auto_signals:off",
+            ),
+            InlineKeyboardButton(
+                text=("✅ " if AUTO_SIGNALS_ENABLED else "") + "ON",
+                callback_data="settings:set_auto_signals:on",
+            ),
+        ],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:menu")],
+    ])
+
+
+def cooldown_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    for i in range(0, len(COOLDOWN_OPTIONS), 2):
+        rows.append([
+            InlineKeyboardButton(
+                text=("✅ " if value == SIGNAL_COOLDOWN_MINUTES else "") + human_interval(value * 60),
+                callback_data=f"settings:set_cooldown:{value}",
+            )
+            for value in COOLDOWN_OPTIONS[i:i + 2]
+        ])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def max_signals_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    for i in range(0, len(MAX_SIGNALS_OPTIONS), 3):
+        rows.append([
+            InlineKeyboardButton(
+                text=("✅ " if value == MAX_SIGNALS_PER_SCAN else "") + str(value),
+                callback_data=f"settings:set_max_signals:{value}",
+            )
+            for value in MAX_SIGNALS_OPTIONS[i:i + 3]
         ])
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -894,6 +943,7 @@ def save_json(path: Path, data: Any) -> None:
 
 
 apply_runtime_settings(load_runtime_settings())
+save_runtime_settings()
 
 
 def load_subscribers() -> Set[int]:
@@ -920,8 +970,8 @@ def save_sent_signals(data: dict[str, float]) -> None:
 def load_api_keys() -> dict[str, dict[str, str]]:
     data: dict[str, dict[str, str]] = {}
 
-    # Безопасный режим по умолчанию: LIVE-ключи читаются только из Railway Variables/.env.
-    # Файловое хранение можно включить вручную через ALLOW_API_KEYS_FILE=true, если очень нужно.
+    # LIVE-ключи сохраняются через Telegram-команду /api_set в data/api_keys.json.
+    # Railway Variables для API больше не используются: в Railway нужны только BOT_TOKEN и ADMIN_IDS.
     if ALLOW_API_KEYS_FILE:
         file_data = load_json(API_KEYS_FILE, {})
         if isinstance(file_data, dict):
@@ -932,12 +982,6 @@ def load_api_keys() -> dict[str, dict[str, str]]:
                         "api_secret": str(values.get("api_secret", "")).strip(),
                     }
 
-    # Railway/env ключи имеют приоритет над файлом.
-    for exchange in ("mexc", "bingx"):
-        key = os.getenv(f"{exchange.upper()}_API_KEY", "").strip()
-        secret = os.getenv(f"{exchange.upper()}_API_SECRET", "").strip()
-        if key and secret:
-            data[exchange] = {"api_key": key, "api_secret": secret}
     return data
 
 
@@ -1934,16 +1978,13 @@ def api_status_text() -> str:
         "",
         "Для LIVE-торговли нужны права <b>Read + Trade</b>. <b>Withdraw/вывод средств не включай.</b>",
         "",
-        "Безопасный способ: добавь ключи в Railway Variables:",
-        "<code>MEXC_API_KEY</code>, <code>MEXC_API_SECRET</code>",
-        "<code>BINGX_API_KEY</code>, <code>BINGX_API_SECRET</code>",
-        "",
-        "Команда /api_set включена по умолчанию, как в старой версии, и сохраняет ключи в data/api_keys.json.",
+        "В этой сборке API-ключи добавляются только из Telegram командой /api_set.",
+        "Railway Variables используются только для BOT_TOKEN и ADMIN_IDS.",
     ]
     if ALLOW_API_KEYS_FILE:
         lines += [
             "",
-            "⚠️ Файловое хранение ключей включено. Чтобы отключить /api_set, установи ALLOW_API_KEYS_FILE=false.",
+            "⚠️ Ключи хранятся в data/api_keys.json. Используй Railway Volume для постоянного хранения.",
             "Команды:",
             "<code>/api_set MEXC API_KEY API_SECRET</code>",
             "<code>/api_clear MEXC</code>",
@@ -5379,12 +5420,8 @@ async def cmd_api_set(message: Message, command: CommandObject) -> None:
         return
     if not ALLOW_API_KEYS_FILE:
         await message.answer(
-            "🔐 Файловое хранение API-ключей отключено.\n\n"
-            "Добавь ключи в Railway Variables вместо Telegram-команды:\n"
-            "<code>MEXC_API_KEY</code>, <code>MEXC_API_SECRET</code>\n"
-            "<code>BINGX_API_KEY</code>, <code>BINGX_API_SECRET</code>\n\n"
-            "Это безопаснее: секреты не попадут в <code>data/api_keys.json</code>. "
-            "Чтобы вернуть команду /api_set, установи <code>ALLOW_API_KEYS_FILE=true</code>."
+            "🔐 Файловое хранение API-ключей отключено в коде.\n\n"
+            "В этой сборке Railway Variables используются только для <code>BOT_TOKEN</code> и <code>ADMIN_IDS</code>."
         )
         return
 
@@ -5435,7 +5472,7 @@ async def cmd_api_clear(message: Message, command: CommandObject) -> None:
     exchange = (command.args or MARKET_DATA_PROVIDER).strip().lower()
     if exchange == "all":
         save_api_keys({})
-        await message.answer("🧹 Файловые API ключи очищены. Если ключи заданы в Railway Variables, удали их в Railway Dashboard.")
+        await message.answer("🧹 Файловые API ключи очищены.")
         return
     if exchange not in EXCHANGE_OPTIONS:
         await message.answer("Формат: <code>/api_clear MEXC</code>, <code>/api_clear BINGX</code> или <code>/api_clear all</code>.")
@@ -5443,7 +5480,7 @@ async def cmd_api_clear(message: Message, command: CommandObject) -> None:
     keys = load_api_keys()
     keys.pop(exchange, None)
     save_api_keys(keys)
-    await message.answer(f"🧹 Файловые API ключи для {html.escape(exchange_label(exchange))} очищены. Railway Variables этой командой не удаляются.")
+    await message.answer(f"🧹 Файловые API ключи для {html.escape(exchange_label(exchange))} очищены.")
 
 
 @dp.message(Command("margin"))
@@ -5530,7 +5567,7 @@ async def cmd_close_trade(message: Message, command: CommandObject, bot: Bot) ->
 
 @dp.callback_query(F.data.startswith("settings:"))
 async def settings_callback(callback: CallbackQuery) -> None:
-    global SIGNAL_TIMEFRAME, MIN_SIGNAL_PROBABILITY, SCAN_INTERVAL_SECONDS, MARKET_DATA_PROVIDER
+    global AUTO_SIGNALS_ENABLED, SIGNAL_TIMEFRAME, MIN_SIGNAL_PROBABILITY, SCAN_INTERVAL_SECONDS, SIGNAL_COOLDOWN_MINUTES, MAX_SIGNALS_PER_SCAN, MARKET_DATA_PROVIDER
     global AUTO_TRADE_MODE, TRADE_MARGIN_USDT, AUTO_CLOSE_TP_INDEX, SMART_ALGORITHM_ENABLED
     global NEURAL_OPTIMIZER_ENABLED, SUPER_DEAL_ENABLED, BTC_ETH_ONLY_MODE_ENABLED, SLOPE_LEVELS_ENABLED, TRADING_IMPROVEMENTS_ENABLED
     global TREND_FILTER_ENABLED, TREND_TIMEFRAME
@@ -5547,6 +5584,15 @@ async def settings_callback(callback: CallbackQuery) -> None:
 
     if data == "settings:menu":
         await message.edit_text(settings_menu_text(), reply_markup=settings_keyboard())
+        await callback.answer()
+        return
+
+    if data == "settings:auto_signals":
+        await message.edit_text(
+            f"<b>🟢 Авто-сигналы</b>\n\nСейчас: <b>{html.escape(auto_signals_label())}</b>\n\n"
+            "OFF остановит фоновый авто-скан. Ручной /scan останется доступен.",
+            reply_markup=auto_signals_keyboard(),
+        )
         await callback.answer()
         return
 
@@ -5578,6 +5624,22 @@ async def settings_callback(callback: CallbackQuery) -> None:
         await message.edit_text(
             f"<b>🔁 Выбери интервал скана</b>\n\nСейчас: <b>{human_interval(SCAN_INTERVAL_SECONDS)}</b>",
             reply_markup=interval_keyboard(),
+        )
+        await callback.answer()
+        return
+
+    if data == "settings:cooldown":
+        await message.edit_text(
+            f"<b>🧊 Выбери cooldown между сигналами по одной монете</b>\n\nСейчас: <b>{human_interval(SIGNAL_COOLDOWN_MINUTES * 60)}</b>",
+            reply_markup=cooldown_keyboard(),
+        )
+        await callback.answer()
+        return
+
+    if data == "settings:max_signals":
+        await message.edit_text(
+            f"<b>📤 Выбери максимум сигналов за один скан</b>\n\nСейчас: <b>{MAX_SIGNALS_PER_SCAN}</b>",
+            reply_markup=max_signals_keyboard(),
         )
         await callback.answer()
         return
@@ -5764,7 +5826,18 @@ async def settings_callback(callback: CallbackQuery) -> None:
         keys.pop(MARKET_DATA_PROVIDER, None)
         save_api_keys(keys)
         await message.edit_text(api_status_text(), reply_markup=api_keyboard())
-        await callback.answer("Файловые ключи очищены; Railway Variables удаляются только в Railway", show_alert=True)
+        await callback.answer("Файловые ключи очищены", show_alert=True)
+        return
+
+    if data.startswith("settings:set_auto_signals:"):
+        value = data.split(":", 2)[2].lower()
+        if value in {"on", "off"}:
+            AUTO_SIGNALS_ENABLED = value == "on"
+            save_runtime_settings()
+            await message.edit_text(settings_menu_text(), reply_markup=settings_keyboard())
+            await callback.answer("Авто-сигналы включены" if AUTO_SIGNALS_ENABLED else "Авто-сигналы выключены")
+        else:
+            await callback.answer("Неверное значение", show_alert=True)
         return
 
     if data.startswith("settings:set_exchange:"):
@@ -5817,6 +5890,36 @@ async def settings_callback(callback: CallbackQuery) -> None:
             await callback.answer(f"Интервал: {human_interval(value)}")
         else:
             await callback.answer("Неверный интервал", show_alert=True)
+        return
+
+    if data.startswith("settings:set_cooldown:"):
+        try:
+            value = int(data.split(":", 2)[2])
+        except ValueError:
+            await callback.answer("Неверное значение", show_alert=True)
+            return
+        if value in COOLDOWN_OPTIONS:
+            SIGNAL_COOLDOWN_MINUTES = value
+            save_runtime_settings()
+            await message.edit_text(settings_menu_text(), reply_markup=settings_keyboard())
+            await callback.answer(f"Cooldown: {human_interval(value * 60)}")
+        else:
+            await callback.answer("Неверный cooldown", show_alert=True)
+        return
+
+    if data.startswith("settings:set_max_signals:"):
+        try:
+            value = int(data.split(":", 2)[2])
+        except ValueError:
+            await callback.answer("Неверное значение", show_alert=True)
+            return
+        if value in MAX_SIGNALS_OPTIONS:
+            MAX_SIGNALS_PER_SCAN = value
+            save_runtime_settings()
+            await message.edit_text(settings_menu_text(), reply_markup=settings_keyboard())
+            await callback.answer(f"Макс. сигналов: {value}")
+        else:
+            await callback.answer("Неверное количество", show_alert=True)
         return
 
     if data.startswith("settings:set_smart:"):
