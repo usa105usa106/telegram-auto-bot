@@ -23,6 +23,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+BOT_STARTED_AT = time.time()
+
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
 # В Railway должны быть только BOT_TOKEN и ADMIN_IDS.
@@ -165,7 +167,13 @@ BTC_ETH_ONLY_MAX_ENTRY_ATR_DISTANCE = 1.6
 BTC_ETH_CONFIRMATION_TIMEFRAMES = ["1h", "4h"]
 
 # ---- Наклонные уровни / slope levels ----
-SLOPE_LEVELS_ENABLED = False
+# Режимы:
+# off  — наклонки выключены, обычные сигналы идут по общему порогу.
+# only — отправляются/открываются только найденные наклонки; общий порог проходимости не обязателен.
+# both — строгий режим: общий порог проходимости + наклонка должны совпасть одновременно.
+SLOPE_LEVELS_MODE = "off"
+SLOPE_LEVELS_ENABLED = False  # legacy-флаг, синхронизируется с SLOPE_LEVELS_MODE
+SLOPE_LEVEL_MODE_OPTIONS = {"off", "only", "both"}
 SLOPE_LEVEL_MIN_BASE_PROBABILITY = 75
 SLOPE_LEVEL_MIN_LEVEL_PROBABILITY = 85
 SLOPE_LEVEL_PRIORITY_PROBABILITY = 98
@@ -308,6 +316,7 @@ def save_runtime_settings() -> None:
         "SUPER_DEAL_ENABLED": SUPER_DEAL_ENABLED,
         "BTC_ETH_ONLY_MODE_ENABLED": BTC_ETH_ONLY_MODE_ENABLED,
         "SLOPE_LEVELS_ENABLED": SLOPE_LEVELS_ENABLED,
+        "SLOPE_LEVELS_MODE": SLOPE_LEVELS_MODE,
         "TRADING_IMPROVEMENTS_ENABLED": TRADING_IMPROVEMENTS_ENABLED,
     })
 
@@ -315,7 +324,7 @@ def save_runtime_settings() -> None:
 def apply_runtime_settings(settings: dict[str, Any]) -> None:
     global AUTO_SIGNALS_ENABLED, MIN_SIGNAL_PROBABILITY, SIGNAL_TIMEFRAME, SCAN_INTERVAL_SECONDS, SIGNAL_COOLDOWN_MINUTES, MAX_SIGNALS_PER_SCAN, MARKET_DATA_PROVIDER
     global AUTO_TRADE_MODE, TRADE_MARGIN_USDT, AUTO_CLOSE_TP_INDEX, SMART_ALGORITHM_ENABLED
-    global NEURAL_OPTIMIZER_ENABLED, SUPER_DEAL_ENABLED, BTC_ETH_ONLY_MODE_ENABLED, SLOPE_LEVELS_ENABLED, TRADING_IMPROVEMENTS_ENABLED
+    global NEURAL_OPTIMIZER_ENABLED, SUPER_DEAL_ENABLED, BTC_ETH_ONLY_MODE_ENABLED, SLOPE_LEVELS_ENABLED, SLOPE_LEVELS_MODE, TRADING_IMPROVEMENTS_ENABLED
     global TREND_FILTER_ENABLED, TREND_TIMEFRAME
 
     auto_raw = settings.get("AUTO_SIGNALS_ENABLED", AUTO_SIGNALS_ENABLED)
@@ -406,11 +415,18 @@ def apply_runtime_settings(settings: dict[str, Any]) -> None:
     else:
         BTC_ETH_ONLY_MODE_ENABLED = str(btc_eth_raw).strip().lower() in {"1", "true", "yes", "on"}
 
-    slope_raw = settings.get("SLOPE_LEVELS_ENABLED", SLOPE_LEVELS_ENABLED)
-    if isinstance(slope_raw, bool):
-        SLOPE_LEVELS_ENABLED = slope_raw
+    slope_mode_raw = str(settings.get("SLOPE_LEVELS_MODE", "")).strip().lower()
+    if slope_mode_raw in SLOPE_LEVEL_MODE_OPTIONS:
+        SLOPE_LEVELS_MODE = slope_mode_raw
+        SLOPE_LEVELS_ENABLED = SLOPE_LEVELS_MODE != "off"
     else:
-        SLOPE_LEVELS_ENABLED = str(slope_raw).strip().lower() in {"1", "true", "yes", "on"}
+        # Совместимость со старыми settings.json, где была только кнопка ON/OFF.
+        slope_raw = settings.get("SLOPE_LEVELS_ENABLED", SLOPE_LEVELS_ENABLED)
+        if isinstance(slope_raw, bool):
+            SLOPE_LEVELS_ENABLED = slope_raw
+        else:
+            SLOPE_LEVELS_ENABLED = str(slope_raw).strip().lower() in {"1", "true", "yes", "on"}
+        SLOPE_LEVELS_MODE = "both" if SLOPE_LEVELS_ENABLED else "off"
 
     improvements_raw = settings.get("TRADING_IMPROVEMENTS_ENABLED", TRADING_IMPROVEMENTS_ENABLED)
     if isinstance(improvements_raw, bool):
@@ -492,12 +508,37 @@ def btc_eth_only_label() -> str:
     return "OFF — сканируются монеты из общего списка"
 
 
+def slope_levels_active() -> bool:
+    return SLOPE_LEVELS_MODE in {"only", "both"}
+
+
+def slope_mode_only() -> bool:
+    return SLOPE_LEVELS_MODE == "only"
+
+
+def slope_mode_requires_threshold() -> bool:
+    return SLOPE_LEVELS_MODE == "both"
+
+
+def set_slope_levels_mode(mode: str) -> bool:
+    global SLOPE_LEVELS_MODE, SLOPE_LEVELS_ENABLED
+    mode = str(mode).strip().lower()
+    if mode not in SLOPE_LEVEL_MODE_OPTIONS:
+        return False
+    SLOPE_LEVELS_MODE = mode
+    SLOPE_LEVELS_ENABLED = mode != "off"
+    return True
+
+
 def slope_levels_label() -> str:
-    if SLOPE_LEVELS_ENABLED:
-        return (
-            f"ON — наклонки, уровень ≥{SLOPE_LEVEL_MIN_LEVEL_PROBABILITY}%, "
-            f"touches ≥{SLOPE_LEVEL_MIN_TOUCHES}, dist ≤{SLOPE_LEVEL_MAX_ENTRY_ATR_DISTANCE:g} ATR"
-        )
+    base = (
+        f"уровень ≥{SLOPE_LEVEL_MIN_LEVEL_PROBABILITY}%, "
+        f"touches ≥{SLOPE_LEVEL_MIN_TOUCHES}, dist ≤{SLOPE_LEVEL_MAX_ENTRY_ATR_DISTANCE:g} ATR"
+    )
+    if SLOPE_LEVELS_MODE == "only":
+        return f"ON — только наклонки ({base}), общий порог не обязателен"
+    if SLOPE_LEVELS_MODE == "both":
+        return f"ON — порог {MIN_SIGNAL_PROBABILITY}% + наклонки ({base}), оба фильтра обязательны"
     return "OFF — без фильтра наклонных уровней"
 
 
@@ -770,12 +811,20 @@ def slope_levels_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(
-                text=("✅ " if not SLOPE_LEVELS_ENABLED else "") + "OFF",
+                text=("✅ " if SLOPE_LEVELS_MODE == "off" else "") + "OFF",
                 callback_data="settings:set_slope_levels:off",
             ),
+        ],
+        [
             InlineKeyboardButton(
-                text=("✅ " if SLOPE_LEVELS_ENABLED else "") + "ON",
-                callback_data="settings:set_slope_levels:on",
+                text=("✅ " if SLOPE_LEVELS_MODE == "only" else "") + "📐 Только наклонки",
+                callback_data="settings:set_slope_levels:only",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=("✅ " if SLOPE_LEVELS_MODE == "both" else "") + "🎯 Порог + наклонки",
+                callback_data="settings:set_slope_levels:both",
             ),
         ],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:menu")],
@@ -862,7 +911,8 @@ def api_keyboard() -> InlineKeyboardMarkup:
 keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📊 Статус"), KeyboardButton(text="🧪 Скан сейчас")],
-        [KeyboardButton(text="🆔 Мой ID"), KeyboardButton(text="❓ Помощь")],
+        [KeyboardButton(text="🏓 Ping"), KeyboardButton(text="🆔 Мой ID")],
+        [KeyboardButton(text="❓ Помощь")],
         [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="🧠 Умный алгоритм")],
         [KeyboardButton(text="🤖 Нейросети"), KeyboardButton(text="🧭 Фильтр тренда")],
         [KeyboardButton(text="🔴 Супер сделка"), KeyboardButton(text="₿ Только BTC/ETH")],
@@ -2231,7 +2281,10 @@ def scan_summary_text(scan: ScanResult, title: str = "🧪 Отчёт авто-�
             f"отсечено <b>{scan.improvements_blocked}</b>"
         )
     if scan.sendable:
-        lines.append("\n<b>Найдены сигналы  выше порога:</b>")
+        if slope_mode_only():
+            lines.append("\n<b>Найдены наклонки:</b>")
+        else:
+            lines.append("\n<b>Найдены сигналы выше порога:</b>")
         for c in scan.sendable[:TOP_PREVIEW_COUNT]:
             lines.append(f"• {html.escape(c.symbol)} {c.side} <b>{c.probability}%</b> · вход {html.escape(fmt_price(c.entry))}")
     elif scan.candidates:
@@ -2993,7 +3046,7 @@ def build_stop_and_tps(side: str, entry: float, atr_value: float) -> tuple[float
     return stop, tps
 
 
-def analyze_candles(symbol: str, candles: list[dict[str, float]]) -> Optional[SignalCandidate]:
+def analyze_candles(symbol: str, candles: list[dict[str, float]], allow_weak: bool = False) -> Optional[SignalCandidate]:
     if len(candles) < 80:
         return None
     closes = [c["close"] for c in candles]
@@ -3094,9 +3147,19 @@ def analyze_candles(symbol: str, candles: list[dict[str, float]]) -> Optional[Si
     if candle_red:
         short_score += 5
 
-    # Flat/noise filter. Keep weaker candidates visible for debug, but not if both sides are nearly equal.
+    # Flat/noise filter. For auto scan we skip almost equal sides.
+    # For manual coin scan with наклонки ON we allow a weak base candidate so
+    # the slope-level detector can still check the chart. This keeps manual
+    # scans independent from the auto-send threshold.
     if abs(long_score - short_score) < 6:
-        return None
+        if not allow_weak:
+            return None
+        if entry >= ema21[-1]:
+            long_score = max(long_score, short_score + 1, 50)
+            long_reasons.append("ручной скан: слабый перевес LONG, проверяю наклонку отдельно")
+        else:
+            short_score = max(short_score, long_score + 1, 50)
+            short_reasons.append("ручной скан: слабый перевес SHORT, проверяю наклонку отдельно")
 
     if long_score > short_score:
         side = "LONG"
@@ -3109,6 +3172,67 @@ def analyze_candles(symbol: str, candles: list[dict[str, float]]) -> Optional[Si
 
     stop, tps = build_stop_and_tps(side, entry, atr_now)
     return SignalCandidate(symbol=symbol, side=side, probability=probability, entry=entry, stop=stop, take_profits=tps, reasons=reasons[:5], timeframe=SIGNAL_TIMEFRAME)
+
+
+def build_manual_slope_probe_candidate(
+    symbol: str,
+    candles: list[dict[str, float]],
+    trend: Optional[TrendInfo] = None,
+) -> Optional[SignalCandidate]:
+    """Create a low-priority candidate only to probe slope levels in manual scans.
+
+    It is not used to auto-send a signal by itself. The goal is to make a
+    manually typed coin scan the slope-level pattern even when the ordinary
+    scoring is below the current bot threshold.
+    """
+    if len(candles) < 50:
+        return None
+    closes = [c["close"] for c in candles]
+    highs = [c["high"] for c in candles]
+    lows = [c["low"] for c in candles]
+    entry = closes[-1]
+    if entry <= 0:
+        return None
+
+    atrs = calculate_atr(highs, lows, closes, 14)
+    atr_now = atrs[-1] if atrs else None
+    if atr_now is None or atr_now <= 0:
+        return None
+
+    side: Optional[str] = None
+    if trend and trend.direction == "BULL":
+        side = "LONG"
+    elif trend and trend.direction == "BEAR":
+        side = "SHORT"
+    else:
+        ema21_values = ema(closes, 21)
+        if ema21_values:
+            side = "LONG" if closes[-1] >= ema21_values[-1] else "SHORT"
+        elif len(closes) >= 2:
+            side = "LONG" if closes[-1] >= closes[-2] else "SHORT"
+
+    if side not in {"LONG", "SHORT"}:
+        return None
+
+    stop, tps = build_stop_and_tps(side, entry, atr_now)
+    probability = 50
+    if trend and trend.direction in {"BULL", "BEAR"}:
+        probability = max(probability, min(70, int(trend.confidence)))
+    reasons = [
+        "ручной скан: порог автоотправки не блокирует проверку наклонки",
+        "базовый сетап слабый, отдельно ищу наклонный уровень",
+    ]
+    return SignalCandidate(
+        symbol=symbol,
+        side=side,
+        probability=probability,
+        entry=entry,
+        stop=stop,
+        take_profits=tps,
+        reasons=reasons,
+        timeframe=SIGNAL_TIMEFRAME,
+        trend=trend,
+    )
 
 
 def attach_trend_to_candidate(candidate: SignalCandidate, trend: Optional[TrendInfo]) -> SignalCandidate:
@@ -3355,10 +3479,13 @@ def r2_for_points(points: list[tuple[int, float]], slope: float, intercept: floa
     return max(0.0, min(1.0, 1.0 - ss_res / ss_tot))
 
 
-def detect_slope_level(candidate: SignalCandidate, candles: list[dict[str, float]]) -> Optional[SlopeLevelInfo]:
+def detect_slope_level(candidate: SignalCandidate, candles: list[dict[str, float]], *, ignore_base_probability: bool = True) -> Optional[SlopeLevelInfo]:
     if not candles or len(candles) < max(50, SLOPE_LEVEL_LOOKBACK_CANDLES // 2):
         return None
-    if candidate.probability < SLOPE_LEVEL_MIN_BASE_PROBABILITY:
+    # Важное исправление: порог автоотправки и базовая проходимость не должны
+    # запрещать поиск наклонки. Хорошая наклонка сама поднимает итоговую
+    # вероятность до SLOPE_LEVEL_MIN_LEVEL_PROBABILITY и выше.
+    if (not ignore_base_probability) and candidate.probability < SLOPE_LEVEL_MIN_BASE_PROBABILITY:
         return None
     if not trend_matches_side(candidate, SLOPE_LEVEL_TREND_SCORE_ABS):
         return None
@@ -3565,10 +3692,15 @@ def render_slope_level_chart(candidate: SignalCandidate, candles: list[dict[str,
         return None
 
 
-def apply_slope_level_filter(candidate: Optional[SignalCandidate], candles: list[dict[str, float]]) -> Optional[SignalCandidate]:
-    if candidate is None or not SLOPE_LEVELS_ENABLED:
+def apply_slope_level_filter(
+    candidate: Optional[SignalCandidate],
+    candles: list[dict[str, float]],
+    *,
+    ignore_base_probability: bool = True,
+) -> Optional[SignalCandidate]:
+    if candidate is None or not slope_levels_active():
         return candidate
-    level = detect_slope_level(candidate, candles)
+    level = detect_slope_level(candidate, candles, ignore_base_probability=ignore_base_probability)
     if level is None:
         return None
     priority = (
@@ -3683,7 +3815,7 @@ async def scan_market_detailed() -> ScanResult:
                 btc_eth_candles: dict[str, Optional[list[dict[str, float]]]] = {}
                 if signal_candles:
                     btc_eth_candles[SIGNAL_TIMEFRAME] = signal_candles
-                if signal_candles and (TREND_FILTER_ENABLED or SUPER_DEAL_ENABLED or BTC_ETH_ONLY_MODE_ENABLED or SLOPE_LEVELS_ENABLED):
+                if signal_candles and (TREND_FILTER_ENABLED or SUPER_DEAL_ENABLED or BTC_ETH_ONLY_MODE_ENABLED or slope_levels_active()):
                     if TREND_TIMEFRAME == SIGNAL_TIMEFRAME:
                         trend_candles = signal_candles
                     else:
@@ -3718,8 +3850,8 @@ async def scan_market_detailed() -> ScanResult:
             continue
 
         result.successful_symbols += 1
-        candidate = analyze_candles(symbol, signal_candles)
-        if candidate and (TREND_FILTER_ENABLED or SUPER_DEAL_ENABLED or BTC_ETH_ONLY_MODE_ENABLED or SLOPE_LEVELS_ENABLED):
+        candidate = analyze_candles(symbol, signal_candles, allow_weak=slope_mode_only())
+        if candidate and (TREND_FILTER_ENABLED or SUPER_DEAL_ENABLED or BTC_ETH_ONLY_MODE_ENABLED or slope_levels_active()):
             trend = analyze_primary_trend(trend_candles, TREND_TIMEFRAME)
             if TREND_FILTER_ENABLED or SUPER_DEAL_ENABLED:
                 filtered = apply_trend_filter(candidate, trend)
@@ -3762,12 +3894,22 @@ async def scan_market_detailed() -> ScanResult:
                     result.improvements_passed += 1
         if candidate:
             before_slope = candidate
-            candidate = apply_slope_level_filter(candidate, signal_candles)
-            if SLOPE_LEVELS_ENABLED:
-                if candidate is None:
+            if slope_levels_active():
+                if slope_mode_requires_threshold() and candidate.probability < MIN_SIGNAL_PROBABILITY:
+                    candidate = None
                     result.slope_blocked += 1
-                elif candidate is not before_slope:
-                    result.slope_passed += 1
+                else:
+                    candidate = apply_slope_level_filter(
+                        candidate,
+                        signal_candles,
+                        ignore_base_probability=True,
+                    )
+                    if candidate is None:
+                        result.slope_blocked += 1
+                    elif candidate is not before_slope:
+                        result.slope_passed += 1
+            else:
+                candidate = apply_slope_level_filter(candidate, signal_candles)
         if candidate:
             candidate = apply_super_deal_filter(candidate)
             if SUPER_DEAL_ENABLED:
@@ -3780,7 +3922,12 @@ async def scan_market_detailed() -> ScanResult:
 
     candidates.sort(key=lambda x: x.probability, reverse=True)
     result.candidates = candidates
-    result.sendable = [c for c in candidates if c.probability >= MIN_SIGNAL_PROBABILITY][:MAX_SIGNALS_PER_SCAN]
+    if slope_mode_only():
+        # В режиме «только наклонки» общий порог MIN_SIGNAL_PROBABILITY не режет сигнал:
+        # отправляем только кандидатов, у которых реально найден наклонный уровень.
+        result.sendable = [c for c in candidates if c.slope_level is not None][:MAX_SIGNALS_PER_SCAN]
+    else:
+        result.sendable = [c for c in candidates if c.probability >= MIN_SIGNAL_PROBABILITY][:MAX_SIGNALS_PER_SCAN]
     return result
 
 async def scan_market() -> list[SignalCandidate]:
@@ -4466,6 +4613,7 @@ async def open_autotrade_for_signal(bot: Bot, candidate: SignalCandidate) -> Opt
         "is_super_deal": candidate.is_super_deal,
         "super_deal_score": candidate.super_deal_score,
         "slope_levels_enabled": SLOPE_LEVELS_ENABLED,
+        "slope_levels_mode": SLOPE_LEVELS_MODE,
         "slope_level": slope_level_to_dict(candidate.slope_level),
         "entry": candidate.entry,
         "stop": candidate.stop,
@@ -4956,16 +5104,17 @@ async def auto_signal_worker(bot: Bot) -> None:
         await asyncio.sleep(SCAN_INTERVAL_SECONDS)
 
 
-async def scan_single_symbol(symbol: str) -> tuple[Optional[SignalCandidate], bool, int]:
+async def scan_single_symbol(symbol: str) -> tuple[Optional[SignalCandidate], bool, int, str]:
     """Скан одной монеты для ручного ввода.
 
-    Возвращает: candidate, has_data, candles_count.
-    Таймаут нужен, чтобы бот не зависал на сообщении «Сканирую...»,
-    если API биржи медленно отвечает или подвисает.
+    Возвращает: candidate, has_data, candles_count, note.
+    Ручной скан повторяет выбранный режим наклонок:
+    OFF — обычный ручной скан; ONLY — ищет наклонку без общего порога;
+    BOTH — нужен общий порог проходимости и найденная наклонка.
     """
     normalized = normalize_user_symbol(symbol)
     if not normalized:
-        return None, False, 0
+        return None, False, 0, ""
     timeout = aiohttp.ClientTimeout(total=25)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         candles = await asyncio.wait_for(fetch_klines(session, normalized, SIGNAL_TIMEFRAME, KLINES_LIMIT), timeout=30)
@@ -4973,7 +5122,7 @@ async def scan_single_symbol(symbol: str) -> tuple[Optional[SignalCandidate], bo
         btc_eth_candles: dict[str, Optional[list[dict[str, float]]]] = {}
         if candles:
             btc_eth_candles[SIGNAL_TIMEFRAME] = candles
-        if candles and (TREND_FILTER_ENABLED or SUPER_DEAL_ENABLED or BTC_ETH_ONLY_MODE_ENABLED or SLOPE_LEVELS_ENABLED):
+        if candles and (TREND_FILTER_ENABLED or SUPER_DEAL_ENABLED or BTC_ETH_ONLY_MODE_ENABLED or slope_levels_active()):
             if TREND_TIMEFRAME == SIGNAL_TIMEFRAME:
                 trend_candles = candles
             else:
@@ -4985,14 +5134,55 @@ async def scan_single_symbol(symbol: str) -> tuple[Optional[SignalCandidate], bo
                     continue
                 btc_eth_candles[tf] = await asyncio.wait_for(fetch_klines(session, normalized, tf, KLINES_LIMIT), timeout=30)
     if not candles:
-        return None, False, 0
-    candidate = analyze_candles(normalized, candles)
-    if candidate and (TREND_FILTER_ENABLED or SUPER_DEAL_ENABLED or BTC_ETH_ONLY_MODE_ENABLED or SLOPE_LEVELS_ENABLED):
+        return None, False, 0, ""
+
+    note = ""
+    trend: Optional[TrendInfo] = None
+    if TREND_FILTER_ENABLED or SUPER_DEAL_ENABLED or BTC_ETH_ONLY_MODE_ENABLED or slope_levels_active():
         trend = analyze_primary_trend(trend_candles, TREND_TIMEFRAME)
-        if TREND_FILTER_ENABLED or SUPER_DEAL_ENABLED:
+
+    # В режиме «только наклонки» ручной скан берёт даже слабый базовый кандидат,
+    # чтобы найти линию уровня без общего порога. В режиме «порог + наклонки»
+    # слабый кандидат не допускается: оба фильтра должны совпасть.
+    candidate = analyze_candles(normalized, candles, allow_weak=slope_mode_only())
+    if candidate and trend is not None:
+        if slope_levels_active():
+            # Для режима наклонок не отсекаем кандидата тренд-фильтром заранее:
+            # наклонка сама проверит совпадение с 4h-трендом.
+            candidate = attach_trend_to_candidate(candidate, trend)
+        elif TREND_FILTER_ENABLED or SUPER_DEAL_ENABLED:
             candidate = apply_trend_filter(candidate, trend)
         else:
             candidate = attach_trend_to_candidate(candidate, trend)
+
+    used_probe_candidate = False
+    if candidate is None and slope_mode_only():
+        candidate = build_manual_slope_probe_candidate(normalized, candles, trend)
+        used_probe_candidate = candidate is not None
+
+    if slope_levels_active() and candidate:
+        if slope_mode_requires_threshold() and candidate.probability < MIN_SIGNAL_PROBABILITY:
+            note = f"📐 Режим наклонок: порог + наклонки. Базовая проходимость {candidate.probability}% ниже порога {MIN_SIGNAL_PROBABILITY}%, поэтому сигнал/сделка не проходят."
+            return None, True, len(candles), note
+        slope_candidate = apply_slope_level_filter(
+            candidate,
+            candles,
+            ignore_base_probability=True,
+        )
+        if slope_candidate:
+            candidate = slope_candidate
+            if slope_mode_only():
+                note = "📐 Наклонка найдена: режим только наклонок, общий порог проходимости не обязателен."
+            else:
+                note = "📐 Наклонка найдена: общий порог и наклонка совпали."
+        else:
+            if slope_mode_only():
+                note = "📐 Наклонка проверена отдельно от порога, но подходящий уровень не найден."
+            else:
+                note = "📐 Режим порог + наклонки: базовый порог пройден, но подходящий наклонный уровень не найден."
+            if used_probe_candidate or slope_mode_requires_threshold():
+                return None, True, len(candles), note
+
     if candidate:
         candidate = apply_btc_eth_only_filter(candidate, candles, btc_eth_candles)
     if candidate:
@@ -5001,12 +5191,11 @@ async def scan_single_symbol(symbol: str) -> tuple[Optional[SignalCandidate], bo
         candidate = apply_smart_algorithm(candidate)
     if candidate:
         candidate = apply_trading_improvements_filters(candidate, candles)
-    if candidate:
+    if candidate and (not slope_levels_active()):
         candidate = apply_slope_level_filter(candidate, candles)
     if candidate:
         candidate = apply_super_deal_filter(candidate)
-    return candidate, True, len(candles)
-
+    return candidate, True, len(candles), note
 
 async def safe_edit(message_to_edit: Message, text: str) -> None:
     try:
@@ -5030,7 +5219,7 @@ async def answer_single_symbol_scan(message: Message, symbol_text: str) -> None:
 
     progress = await message.answer(f"🔎 Сканирую <b>{html.escape(display_symbol(normalized))}</b> на {html.escape(exchange_label())}...")
     try:
-        candidate, has_data, candles_count = await scan_single_symbol(normalized)
+        candidate, has_data, candles_count, scan_note = await scan_single_symbol(normalized)
     except asyncio.TimeoutError:
         logging.exception("Таймаут ручного скана одной монеты")
         await safe_edit(progress, f"⏳ Биржа долго не отвечает по <b>{html.escape(display_symbol(normalized))}</b>. Попробуй ещё раз или переключи биржу в /settings.")
@@ -5056,7 +5245,8 @@ async def answer_single_symbol_scan(message: Message, symbol_text: str) -> None:
             f"Биржа: <b>{html.escape(exchange_label())}</b>\n"
             f"Таймфрейм: <b>{html.escape(SIGNAL_TIMEFRAME)}</b>\n"
             f"Свечей получено: <b>{candles_count}</b>\n\n"
-            "Сильного LONG/SHORT сетапа по текущей логике нет. Лучше подождать."
+            + (html.escape(scan_note) + "\n\n" if scan_note else "")
+            + "Сильного LONG/SHORT сетапа по текущей логике нет. Лучше подождать."
         )
         return
 
@@ -5075,6 +5265,8 @@ async def answer_single_symbol_scan(message: Message, symbol_text: str) -> None:
     )
     if candidate.probability < MIN_SIGNAL_PROBABILITY:
         text += f"\n\nℹ️ Ниже порога автоотправки: {candidate.probability}% < {MIN_SIGNAL_PROBABILITY}%."
+    if scan_note:
+        text += "\n\n" + html.escape(scan_note)
 
     await safe_edit(progress, "✅ Ручной скан завершён")
     if candidate.slope_chart_png:
@@ -5099,7 +5291,7 @@ async def cmd_start(message: Message) -> None:
         "Привет! Я Telegram-бот для автоматических торговых сигналов.\n\n"
         "Ты подписан на сигналы. Бот сам сканирует рынок и отправляет сетапы "
         f"с проходимостью от {MIN_SIGNAL_PROBABILITY}% и выше.\n\n"
-        "Команды: /help, /status, /settings, /scan, /super_deal, /btc_eth, /naklonki, /improvements, /id, /stop",
+        "Команды: /help, /status, /settings, /scan, /ping, /super_deal, /btc_eth, /naklonki, /improvements, /id, /stop",
         reply_markup=keyboard,
     )
 
@@ -5357,8 +5549,8 @@ async def cmd_slope_levels(message: Message) -> None:
         f"Минимальная вероятность уровня: <b>{SLOPE_LEVEL_MIN_LEVEL_PROBABILITY}%</b>\n"
         f"Приоритет хороших наклонок: <b>{SLOPE_LEVEL_PRIORITY_PROBABILITY}%</b>\n"
         f"Графики в сигнале: <b>{'ON' if SLOPE_LEVEL_SEND_CHARTS else 'OFF'}</b>\n\n"
-        "Когда ON, обычный сигнал сначала должен пройти базовые фильтры, затем бот ищет наклонный уровень. "
-        "Если линия, тренд и направление совпали, сделка получает повышенную проходимость и идёт в начало списка сигналов.",
+        "Режим ONLY: отправка/сделка только по найденной наклонке, общий порог проходимости не обязателен. "
+        "Режим BOTH: общий порог + наклонка — оба фильтра обязательны для сигнала и открытия сделки.",
         reply_markup=slope_levels_keyboard(),
     )
 
@@ -5607,7 +5799,7 @@ async def cmd_close_trade(message: Message, command: CommandObject, bot: Bot) ->
 async def settings_callback(callback: CallbackQuery) -> None:
     global AUTO_SIGNALS_ENABLED, SIGNAL_TIMEFRAME, MIN_SIGNAL_PROBABILITY, SCAN_INTERVAL_SECONDS, SIGNAL_COOLDOWN_MINUTES, MAX_SIGNALS_PER_SCAN, MARKET_DATA_PROVIDER
     global AUTO_TRADE_MODE, TRADE_MARGIN_USDT, AUTO_CLOSE_TP_INDEX, SMART_ALGORITHM_ENABLED
-    global NEURAL_OPTIMIZER_ENABLED, SUPER_DEAL_ENABLED, BTC_ETH_ONLY_MODE_ENABLED, SLOPE_LEVELS_ENABLED, TRADING_IMPROVEMENTS_ENABLED
+    global NEURAL_OPTIMIZER_ENABLED, SUPER_DEAL_ENABLED, BTC_ETH_ONLY_MODE_ENABLED, SLOPE_LEVELS_ENABLED, SLOPE_LEVELS_MODE, TRADING_IMPROVEMENTS_ENABLED
     global TREND_FILTER_ENABLED, TREND_TIMEFRAME
 
     if callback.from_user is None or not is_admin(callback.from_user.id):
@@ -5779,8 +5971,9 @@ async def settings_callback(callback: CallbackQuery) -> None:
             f"Минимум касаний: <b>{SLOPE_LEVEL_MIN_TOUCHES}</b>\n"
             f"Макс. расстояние до линии: <b>{SLOPE_LEVEL_MAX_ENTRY_ATR_DISTANCE:g} ATR</b>\n"
             f"Trend score: <b>±{SLOPE_LEVEL_TREND_SCORE_ABS}</b>\n\n"
-            "ON = бот отправляет сигнал и открывает авто-сделку только если наклонный уровень совпал со стороной сделки и основным трендом. "
-            "В сигнал прикладывается график с линией уровня и стрелкой направления. Это технический фильтр, не гарантия прибыли.",
+            "ONLY = только наклонки: общий порог проходимости не обязателен, но уровень должен пройти свои условия. "
+            "BOTH = порог + наклонки: базовая проходимость должна быть не ниже текущего порога, и наклонный уровень тоже должен совпасть. "
+            "Этот режим применяется и к авто-сделкам.",
             reply_markup=slope_levels_keyboard(),
         )
         await callback.answer()
@@ -6028,11 +6221,19 @@ async def settings_callback(callback: CallbackQuery) -> None:
 
     if data.startswith("settings:set_slope_levels:"):
         value = data.split(":", 2)[2].lower()
-        if value in {"on", "off"}:
-            SLOPE_LEVELS_ENABLED = value == "on"
+        # Совместимость: старое ON считаем строгим режимом «порог + наклонки».
+        if value == "on":
+            value = "both"
+        if set_slope_levels_mode(value):
             save_runtime_settings()
             await message.edit_text(settings_menu_text(), reply_markup=settings_keyboard())
-            await callback.answer("Наклонки включены" if SLOPE_LEVELS_ENABLED else "Наклонки выключены")
+            if SLOPE_LEVELS_MODE == "off":
+                answer = "Наклонки выключены"
+            elif SLOPE_LEVELS_MODE == "only":
+                answer = "Наклонки: только наклонки"
+            else:
+                answer = "Наклонки: порог + наклонки"
+            await callback.answer(answer)
         else:
             await callback.answer("Неверное значение", show_alert=True)
         return
@@ -6096,6 +6297,23 @@ async def settings_callback(callback: CallbackQuery) -> None:
 
     await callback.answer()
 
+
+def uptime_text() -> str:
+    seconds = max(0, int(time.time() - BOT_STARTED_AT))
+    return human_interval(seconds) if seconds >= 60 else f"{seconds} сек"
+
+
+@dp.message(Command("ping"))
+async def cmd_ping(message: Message) -> None:
+    started = time.perf_counter()
+    progress = await message.answer("🏓 Проверяю связь с ботом...")
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    await progress.edit_text(
+        "🏓 <b>PONG</b>\n"
+        f"Ответ бота: <b>{elapsed_ms:.0f} мс</b>\n"
+        f"Аптайм процесса: <b>{html.escape(uptime_text())}</b>\n"
+        f"Хранилище: <code>{html.escape(str(DATA_DIR))}</code>"
+    )
 
 @dp.message(Command("scan"))
 async def cmd_scan(message: Message, bot: Bot) -> None:
@@ -6205,6 +6423,11 @@ async def button_status(message: Message) -> None:
 @dp.message(F.text == "🧪 Скан сейчас")
 async def button_scan(message: Message, bot: Bot) -> None:
     await cmd_scan(message, bot)
+
+
+@dp.message(F.text == "🏓 Ping")
+async def button_ping(message: Message) -> None:
+    await cmd_ping(message)
 
 
 @dp.message(F.text == "🆔 Мой ID")
