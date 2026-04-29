@@ -4,11 +4,13 @@ import json
 import logging
 import os
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Set
 
 import aiohttp
+import ccxt.async_support as ccxt
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -39,13 +41,19 @@ SIGNAL_CHAT_IDS = parse_id_set(os.getenv("SIGNAL_CHAT_IDS", ""), allow_negative=
 MIN_SIGNAL_PROBABILITY = int(os.getenv("MIN_SIGNAL_PROBABILITY", "80"))
 AUTO_SIGNALS_ENABLED = os.getenv("AUTO_SIGNALS_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 
-# MEXC-версия. По умолчанию бот игнорирует старую переменную SYMBOLS из Railway
-# и сам берёт топ-100 MEXC Futures по 24h обороту. Это сделано специально,
-# чтобы не зависеть от платного редактирования Variables и не сканировать старые 144 пары.
-MARKET_DATA_PROVIDER = "mexc"
+# Биржи: MEXC Futures и BingX Futures. По умолчанию — MEXC,
+# но переключение теперь есть прямо в Telegram через /settings.
+MARKET_DATA_PROVIDER = os.getenv("MARKET_DATA_PROVIDER", "mexc").strip().lower()
+if MARKET_DATA_PROVIDER not in {"mexc", "bingx"}:
+    MARKET_DATA_PROVIDER = "mexc"
+
 MEXC_API_BASE = os.getenv("MEXC_API_BASE", "https://api.mexc.com").rstrip("/")
+BINGX_API_BASE = os.getenv("BINGX_API_BASE", "https://open-api.bingx.com").rstrip("/")
+
 MEXC_DYNAMIC_TOP_SYMBOLS = os.getenv("MEXC_DYNAMIC_TOP_SYMBOLS", "true").strip().lower() in {"1", "true", "yes", "on"}
+BINGX_DYNAMIC_TOP_SYMBOLS = os.getenv("BINGX_DYNAMIC_TOP_SYMBOLS", "true").strip().lower() in {"1", "true", "yes", "on"}
 MEXC_SYMBOLS_LIMIT = max(1, min(150, int(os.getenv("MEXC_SYMBOLS_LIMIT", "100"))))
+BINGX_SYMBOLS_LIMIT = max(1, min(150, int(os.getenv("BINGX_SYMBOLS_LIMIT", "100"))))
 USE_ENV_SYMBOLS = os.getenv("USE_ENV_SYMBOLS", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 DEFAULT_MEXC_FUTURES_SYMBOLS = [
@@ -86,15 +94,39 @@ AUTO_SCAN_REPORTS_TO_ADMINS = os.getenv("AUTO_SCAN_REPORTS_TO_ADMINS", "true").s
 AUTO_SCAN_REPORT_EVERY_N_SCANS = max(1, int(os.getenv("AUTO_SCAN_REPORT_EVERY_N_SCANS", "1")))
 TOP_PREVIEW_COUNT = max(1, int(os.getenv("TOP_PREVIEW_COUNT", "5")))
 
+# ---- Автоторговля ----
+# По умолчанию выключена. Включается кнопками в /settings.
+# mode:
+#   off   — бот только шлёт сигналы
+#   paper — тестовая торговля без реальных ордеров
+#   live  — реальные рыночные ордера через API
+AUTO_TRADE_MODE = os.getenv("AUTO_TRADE_MODE", "off").strip().lower()
+if AUTO_TRADE_MODE not in {"off", "paper", "live"}:
+    AUTO_TRADE_MODE = "off"
+
+TRADE_MARGIN_USDT = float(os.getenv("TRADE_MARGIN_USDT", "5"))
+TRADE_MARGIN_USDT = max(1.0, min(10000.0, TRADE_MARGIN_USDT))
+AUTO_CLOSE_TP_INDEX = int(os.getenv("AUTO_CLOSE_TP_INDEX", "1"))
+AUTO_CLOSE_TP_INDEX = max(1, min(3, AUTO_CLOSE_TP_INDEX))
+MAX_ACTIVE_TRADES = int(os.getenv("MAX_ACTIVE_TRADES", "1"))
+MAX_ACTIVE_TRADES = max(1, min(20, MAX_ACTIVE_TRADES))
+TRADE_MONITOR_INTERVAL_SECONDS = int(os.getenv("TRADE_MONITOR_INTERVAL_SECONDS", "20"))
+
 DATA_DIR = Path(__file__).parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 SUBSCRIBERS_FILE = DATA_DIR / "subscribers.json"
 SENT_SIGNALS_FILE = DATA_DIR / "sent_signals.json"
 SETTINGS_FILE = DATA_DIR / "settings.json"
+API_KEYS_FILE = DATA_DIR / "api_keys.json"
+TRADES_FILE = DATA_DIR / "trades.json"
 
 TIMEFRAME_OPTIONS = ["5m", "15m", "30m", "1h", "4h"]
 PROBABILITY_OPTIONS = [60, 70, 75, 80, 85, 90]
 SCAN_INTERVAL_OPTIONS = [120, 300, 600, 900, 1800, 3600]
+EXCHANGE_OPTIONS = ["mexc", "bingx"]
+AUTO_TRADE_MODE_OPTIONS = ["off", "paper", "live"]
+TRADE_MARGIN_OPTIONS = [5, 10, 20, 50, 100, 250]
+AUTO_CLOSE_TP_OPTIONS = [1, 2, 3]
 
 
 def load_runtime_settings() -> dict[str, Any]:
@@ -106,11 +138,16 @@ def save_runtime_settings() -> None:
         "MIN_SIGNAL_PROBABILITY": MIN_SIGNAL_PROBABILITY,
         "SIGNAL_TIMEFRAME": SIGNAL_TIMEFRAME,
         "SCAN_INTERVAL_SECONDS": SCAN_INTERVAL_SECONDS,
+        "MARKET_DATA_PROVIDER": MARKET_DATA_PROVIDER,
+        "AUTO_TRADE_MODE": AUTO_TRADE_MODE,
+        "TRADE_MARGIN_USDT": TRADE_MARGIN_USDT,
+        "AUTO_CLOSE_TP_INDEX": AUTO_CLOSE_TP_INDEX,
     })
 
 
 def apply_runtime_settings(settings: dict[str, Any]) -> None:
-    global MIN_SIGNAL_PROBABILITY, SIGNAL_TIMEFRAME, SCAN_INTERVAL_SECONDS
+    global MIN_SIGNAL_PROBABILITY, SIGNAL_TIMEFRAME, SCAN_INTERVAL_SECONDS, MARKET_DATA_PROVIDER
+    global AUTO_TRADE_MODE, TRADE_MARGIN_USDT, AUTO_CLOSE_TP_INDEX
     try:
         probability = int(settings.get("MIN_SIGNAL_PROBABILITY", MIN_SIGNAL_PROBABILITY))
         MIN_SIGNAL_PROBABILITY = max(1, min(100, probability))
@@ -127,6 +164,26 @@ def apply_runtime_settings(settings: dict[str, Any]) -> None:
     except Exception:
         pass
 
+    exchange = str(settings.get("MARKET_DATA_PROVIDER", MARKET_DATA_PROVIDER)).strip().lower()
+    if exchange in EXCHANGE_OPTIONS:
+        MARKET_DATA_PROVIDER = exchange
+
+    mode = str(settings.get("AUTO_TRADE_MODE", AUTO_TRADE_MODE)).strip().lower()
+    if mode in AUTO_TRADE_MODE_OPTIONS:
+        AUTO_TRADE_MODE = mode
+
+    try:
+        margin = float(settings.get("TRADE_MARGIN_USDT", TRADE_MARGIN_USDT))
+        TRADE_MARGIN_USDT = max(1.0, min(10000.0, margin))
+    except Exception:
+        pass
+
+    try:
+        tp_index = int(settings.get("AUTO_CLOSE_TP_INDEX", AUTO_CLOSE_TP_INDEX))
+        AUTO_CLOSE_TP_INDEX = max(1, min(3, tp_index))
+    except Exception:
+        pass
+
 
 def human_interval(seconds: int) -> str:
     if seconds % 3600 == 0:
@@ -138,23 +195,53 @@ def human_interval(seconds: int) -> str:
     return f"{seconds} сек"
 
 
+def exchange_label(exchange: Optional[str] = None) -> str:
+    value = (exchange or MARKET_DATA_PROVIDER).lower()
+    if value == "bingx":
+        return "BingX Futures"
+    return "MEXC Futures"
+
+
+def symbols_mode_text() -> str:
+    if MARKET_DATA_PROVIDER == "mexc" and MEXC_DYNAMIC_TOP_SYMBOLS and not USE_ENV_SYMBOLS:
+        return f"топ {MEXC_SYMBOLS_LIMIT} MEXC Futures по 24h обороту"
+    if MARKET_DATA_PROVIDER == "bingx" and BINGX_DYNAMIC_TOP_SYMBOLS and not USE_ENV_SYMBOLS:
+        return f"топ {BINGX_SYMBOLS_LIMIT} BingX Futures по 24h обороту"
+    return "фиксированный список"
+
+
+def autotrade_label() -> str:
+    if AUTO_TRADE_MODE == "live":
+        return "LIVE — реальные ордера"
+    if AUTO_TRADE_MODE == "paper":
+        return "PAPER — тест без ордеров"
+    return "OFF — выключена"
+
+
 def settings_menu_text() -> str:
     return (
         "<b>⚙️ Настройки авто-бота</b>\n\n"
+        f"Биржа: <b>{html.escape(exchange_label())}</b>\n"
         f"Таймфрейм: <b>{html.escape(SIGNAL_TIMEFRAME)}</b>\n"
         f"Проходимость: <b>{MIN_SIGNAL_PROBABILITY}%</b>\n"
-        f"Интервал скана: <b>{human_interval(SCAN_INTERVAL_SECONDS)}</b>\n\n"
+        f"Интервал скана: <b>{human_interval(SCAN_INTERVAL_SECONDS)}</b>\n"
+        f"Автоторговля: <b>{html.escape(autotrade_label())}</b>\n"
+        f"Маржа/объём сделки: <b>${TRADE_MARGIN_USDT:g}</b>\n"
+        f"Авто-закрытие: <b>SL или TP{AUTO_CLOSE_TP_INDEX}</b>\n\n"
         "Нажми кнопку ниже, чтобы изменить настройку. Изменения применяются сразу."
     )
 
 
 def settings_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏦 Биржа", callback_data="settings:exchange")],
         [
             InlineKeyboardButton(text="⏱ Таймфрейм", callback_data="settings:timeframe"),
             InlineKeyboardButton(text="🎯 Проходимость", callback_data="settings:probability"),
         ],
         [InlineKeyboardButton(text="🔁 Интервал скана", callback_data="settings:interval")],
+        [InlineKeyboardButton(text="💰 Автоторговля", callback_data="settings:autotrade")],
+        [InlineKeyboardButton(text="🔑 API ключи", callback_data="settings:api")],
         [InlineKeyboardButton(text="❌ Закрыть", callback_data="settings:close")],
     ])
 
@@ -201,11 +288,89 @@ def interval_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def exchange_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text=("✅ " if MARKET_DATA_PROVIDER == "mexc" else "") + "MEXC Futures",
+                callback_data="settings:set_exchange:mexc",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=("✅ " if MARKET_DATA_PROVIDER == "bingx" else "") + "BingX Futures",
+                callback_data="settings:set_exchange:bingx",
+            )
+        ],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:menu")],
+    ])
+
+def autotrade_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text=("✅ " if AUTO_TRADE_MODE == "off" else "") + "OFF",
+                callback_data="settings:set_autotrade_mode:off",
+            ),
+            InlineKeyboardButton(
+                text=("✅ " if AUTO_TRADE_MODE == "paper" else "") + "PAPER",
+                callback_data="settings:set_autotrade_mode:paper",
+            ),
+            InlineKeyboardButton(
+                text=("✅ " if AUTO_TRADE_MODE == "live" else "") + "LIVE",
+                callback_data="settings:set_autotrade_mode:live",
+            ),
+        ],
+        [InlineKeyboardButton(text="💵 Маржа/объём сделки", callback_data="settings:trade_margin")],
+        [InlineKeyboardButton(text="🎯 Авто-закрытие TP", callback_data="settings:close_tp")],
+        [InlineKeyboardButton(text="📂 Активные сделки", callback_data="settings:trades")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:menu")],
+    ])
+
+
+def trade_margin_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    for i in range(0, len(TRADE_MARGIN_OPTIONS), 3):
+        rows.append([
+            InlineKeyboardButton(
+                text=("✅ " if abs(value - TRADE_MARGIN_USDT) < 1e-9 else "") + f"${value}",
+                callback_data=f"settings:set_trade_margin:{value}",
+            )
+            for value in TRADE_MARGIN_OPTIONS[i:i + 3]
+        ])
+    rows.append([InlineKeyboardButton(text="✍️ Ввести вручную", callback_data="settings:trade_margin_custom")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:autotrade")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def close_tp_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text=("✅ " if AUTO_CLOSE_TP_INDEX == value else "") + f"TP{value}",
+                callback_data=f"settings:set_close_tp:{value}",
+            )
+            for value in AUTO_CLOSE_TP_OPTIONS
+        ],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:autotrade")],
+    ])
+
+
+def api_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📌 Как добавить ключи", callback_data="settings:api_help")],
+        [InlineKeyboardButton(text="🧹 Очистить ключи текущей биржи", callback_data="settings:api_clear_current")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:menu")],
+    ])
+
+
+
 keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📊 Статус"), KeyboardButton(text="🧪 Скан сейчас")],
         [KeyboardButton(text="🆔 Мой ID"), KeyboardButton(text="❓ Помощь")],
-        [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="🔕 Отписаться")],
+        [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="💰 Автоторговля")],
+        [KeyboardButton(text="🔑 API"), KeyboardButton(text="🔕 Отписаться")],
     ],
     resize_keyboard=True,
 )
@@ -273,6 +438,98 @@ def save_sent_signals(data: dict[str, float]) -> None:
     max_age = max(24 * 3600, SIGNAL_COOLDOWN_MINUTES * 60 * 4)
     cleaned = {k: v for k, v in data.items() if now - v <= max_age}
     save_json(SENT_SIGNALS_FILE, cleaned)
+
+
+def load_api_keys() -> dict[str, dict[str, str]]:
+    data = load_json(API_KEYS_FILE, {})
+    if not isinstance(data, dict):
+        data = {}
+    # Railway/env ключи тоже поддерживаются, но не обязательны.
+    for exchange in ("mexc", "bingx"):
+        key = os.getenv(f"{exchange.upper()}_API_KEY", "").strip()
+        secret = os.getenv(f"{exchange.upper()}_API_SECRET", "").strip()
+        if key and secret and exchange not in data:
+            data[exchange] = {"api_key": key, "api_secret": secret}
+    return data
+
+
+def save_api_keys(data: dict[str, dict[str, str]]) -> None:
+    save_json(API_KEYS_FILE, data)
+
+
+def has_api_keys(exchange: Optional[str] = None) -> bool:
+    keys = load_api_keys().get((exchange or MARKET_DATA_PROVIDER).lower(), {})
+    return bool(keys.get("api_key") and keys.get("api_secret"))
+
+
+def mask_secret(value: str) -> str:
+    if not value:
+        return "нет"
+    if len(value) <= 8:
+        return value[:2] + "***"
+    return value[:4] + "..." + value[-4:]
+
+
+def load_trades() -> list[dict[str, Any]]:
+    data = load_json(TRADES_FILE, [])
+    return data if isinstance(data, list) else []
+
+
+def save_trades(trades: list[dict[str, Any]]) -> None:
+    save_json(TRADES_FILE, trades)
+
+
+def get_open_trades() -> list[dict[str, Any]]:
+    return [t for t in load_trades() if t.get("status") == "open"]
+
+
+def active_trade_for_symbol(symbol: str, exchange: Optional[str] = None) -> Optional[dict[str, Any]]:
+    compact = compact_symbol(symbol)
+    exchange_value = (exchange or MARKET_DATA_PROVIDER).lower()
+    for trade in get_open_trades():
+        if compact_symbol(str(trade.get("symbol", ""))) == compact and str(trade.get("exchange", "")).lower() == exchange_value:
+            return trade
+    return None
+
+
+def api_status_text() -> str:
+    keys = load_api_keys()
+    lines = [
+        "<b>🔑 API ключи</b>",
+        "",
+        f"MEXC: <b>{'добавлены' if has_api_keys('mexc') else 'нет'}</b>",
+        f"BingX: <b>{'добавлены' if has_api_keys('bingx') else 'нет'}</b>",
+        "",
+        "Для LIVE-торговли нужны права <b>Read + Trade</b>. <b>Withdraw/вывод средств не включай.</b>",
+        "",
+        "Добавление ключей командой:",
+        "<code>/api_set MEXC API_KEY API_SECRET</code>",
+        "<code>/api_set BINGX API_KEY API_SECRET</code>",
+        "",
+        "После отправки команды бот попробует удалить сообщение с ключами. Но безопаснее использовать отдельный API-ключ без вывода средств и с минимальными правами.",
+    ]
+    return "\n".join(lines)
+
+
+def trades_status_text() -> str:
+    trades = get_open_trades()
+    if not trades:
+        return "📂 Открытых авто-сделок нет."
+    lines = ["<b>📂 Открытые авто-сделки</b>"]
+    for t in trades:
+        tp_index = int(t.get("tp_index", 1))
+        tps = t.get("take_profits", [])
+        tp = tps[tp_index - 1] if len(tps) >= tp_index else None
+        lines.append(
+            "\n"
+            f"• <b>{html.escape(str(t.get('symbol')))} {html.escape(str(t.get('side')))}</b> "
+            f"({html.escape(str(t.get('mode')))}, {html.escape(str(t.get('exchange')))}):\n"
+            f"  вход {html.escape(fmt_price(float(t.get('entry', 0))))}, "
+            f"SL {html.escape(fmt_price(float(t.get('stop', 0))))}, "
+            f"TP{tp_index} {html.escape(fmt_price(float(tp))) if tp else 'n/a'}\n"
+            f"  объём ≈ ${float(t.get('notional_usdt', 0)):g}, amount {html.escape(str(t.get('amount')))}"
+        )
+    return "\n".join(lines)
 
 
 def get_recipients() -> Set[int]:
@@ -373,7 +630,7 @@ def scan_summary_text(scan: ScanResult, title: str = "🧪 Отчёт авто-�
         f"<b>{title}</b>",
         f"Порог отправки: <b>{MIN_SIGNAL_PROBABILITY}%</b>",
         f"Таймфрейм: <b>{html.escape(SIGNAL_TIMEFRAME)}</b>",
-        f"Источник данных: <b>{html.escape(MARKET_DATA_PROVIDER.upper())} Futures</b>",
+        f"Источник данных: <b>{html.escape(exchange_label())}</b>",
         f"Данные получены: <b>{scan.successful_symbols}</b> / {scan.total_symbols or len(SYMBOLS)}",
         f"Ошибки/нет пары: <b>{scan.failed_symbols}</b>",
     ]
@@ -484,6 +741,8 @@ def compact_symbol(symbol: str) -> str:
 def display_symbol(symbol: str) -> str:
     if MARKET_DATA_PROVIDER == "mexc":
         return mexc_symbol(symbol)
+    if MARKET_DATA_PROVIDER == "bingx":
+        return bingx_symbol(symbol)
     return symbol.upper().replace("USDT", "/USDT")
 
 
@@ -554,12 +813,23 @@ async def fetch_mexc_top_symbols(session: aiohttp.ClientSession, limit: int) -> 
 
 
 async def get_symbols_for_scan(session: aiohttp.ClientSession) -> list[str]:
-    if MARKET_DATA_PROVIDER == "mexc" and MEXC_DYNAMIC_TOP_SYMBOLS and not USE_ENV_SYMBOLS:
-        symbols = await fetch_mexc_top_symbols(session, MEXC_SYMBOLS_LIMIT)
-        if symbols:
-            return symbols
-        logging.warning("MEXC dynamic top symbols не получены, использую DEFAULT_MEXC_FUTURES_SYMBOLS")
-    return SYMBOLS[:MEXC_SYMBOLS_LIMIT] if MARKET_DATA_PROVIDER == "mexc" else SYMBOLS
+    if MARKET_DATA_PROVIDER == "mexc":
+        if MEXC_DYNAMIC_TOP_SYMBOLS and not USE_ENV_SYMBOLS:
+            symbols = await fetch_mexc_top_symbols(session, MEXC_SYMBOLS_LIMIT)
+            if symbols:
+                return symbols
+            logging.warning("MEXC dynamic top symbols не получены, использую DEFAULT_MEXC_FUTURES_SYMBOLS")
+        return SYMBOLS[:MEXC_SYMBOLS_LIMIT]
+
+    if MARKET_DATA_PROVIDER == "bingx":
+        if BINGX_DYNAMIC_TOP_SYMBOLS and not USE_ENV_SYMBOLS:
+            symbols = await fetch_bingx_top_symbols(session, BINGX_SYMBOLS_LIMIT)
+            if symbols:
+                return symbols
+            logging.warning("BingX dynamic top symbols не получены, использую DEFAULT_MEXC_FUTURES_SYMBOLS")
+        return SYMBOLS[:BINGX_SYMBOLS_LIMIT]
+
+    return SYMBOLS
 
 
 async def fetch_mexc_klines(session: aiohttp.ClientSession, symbol: str, interval: str, limit: int) -> Optional[list[dict[str, float]]]:
@@ -606,6 +876,201 @@ async def fetch_mexc_klines(session: aiohttp.ClientSession, symbol: str, interva
             continue
     candles.sort(key=lambda c: c["open_time"])
     return candles or None
+
+
+def bingx_symbol(symbol: str) -> str:
+    clean = symbol.upper().strip().replace("_", "-").replace("/", "-")
+    if "-" in clean:
+        base, quote = clean.split("-", 1)
+        if quote in {"USD", "USDT", "USDC"}:
+            return f"{base}-{quote}"
+        return clean
+    if clean.endswith("USDT"):
+        return clean[:-4] + "-USDT"
+    if clean.endswith("USDC"):
+        return clean[:-4] + "-USDC"
+    return clean + "-USDT"
+
+
+def normalize_user_symbol(raw: str) -> Optional[str]:
+    text = raw.strip().upper().replace(" ", "")
+    if not text or len(text) > 30:
+        return None
+    text = text.replace("/", "").replace("_", "").replace("-", "")
+    if not all(ch.isalnum() for ch in text):
+        return None
+    if text in {"LONG", "SHORT", "HELP", "START", "STATUS", "SETTINGS", "SCAN"}:
+        return None
+    if not text.endswith("USDT") and not text.endswith("USDC"):
+        text += "USDT"
+    return text
+
+
+def is_symbol_query(text: str) -> bool:
+    normalized = normalize_user_symbol(text)
+    if not normalized:
+        return False
+    # Чтобы обычные фразы не воспринимались как монеты.
+    compact = text.strip().replace("/", "").replace("_", "").replace("-", "")
+    return 2 <= len(compact) <= 20 and " " not in text.strip()
+
+
+async def fetch_bingx_top_symbols(session: aiohttp.ClientSession, limit: int) -> Optional[list[str]]:
+    url = f"{BINGX_API_BASE}/openApi/swap/v2/quote/ticker"
+    try:
+        async with session.get(url, timeout=15) as response:
+            if response.status != 200:
+                text = await response.text()
+                logging.warning("BingX ticker HTTP error %s: %s", response.status, text[:160])
+                return None
+            raw = await response.json()
+    except Exception:
+        logging.exception("Не удалось получить BingX ticker")
+        return None
+
+    if str(raw.get("code")) not in {"0", "200"}:
+        logging.warning("BingX ticker API error: %s", str(raw)[:180])
+        return None
+
+    data = raw.get("data", [])
+    if isinstance(data, dict):
+        data = [data]
+
+    rows: list[tuple[float, str]] = []
+    for item in data:
+        try:
+            raw_symbol = str(item.get("symbol", "")).upper().replace("_", "-")
+            if not raw_symbol.endswith("-USDT"):
+                continue
+            last_price = float(item.get("lastPrice") or item.get("price") or item.get("close") or 0)
+            amount = float(
+                item.get("quoteVolume")
+                or item.get("quoteVol")
+                or item.get("amount")
+                or item.get("turnover")
+                or item.get("volume")
+                or 0
+            )
+            if last_price <= 0 or amount <= 0:
+                continue
+            rows.append((amount, compact_symbol(raw_symbol)))
+        except Exception:
+            continue
+
+    rows.sort(reverse=True, key=lambda x: x[0])
+    symbols = []
+    seen = set()
+    for _, symbol in rows:
+        if symbol in seen:
+            continue
+        seen.add(symbol)
+        symbols.append(symbol)
+        if len(symbols) >= limit:
+            break
+    if symbols:
+        return symbols
+    return await fetch_bingx_contract_symbols(session, limit)
+
+
+async def fetch_bingx_contract_symbols(session: aiohttp.ClientSession, limit: int) -> Optional[list[str]]:
+    url = f"{BINGX_API_BASE}/openApi/swap/v2/quote/contracts"
+    try:
+        async with session.get(url, timeout=15) as response:
+            if response.status != 200:
+                text = await response.text()
+                logging.warning("BingX contracts HTTP error %s: %s", response.status, text[:160])
+                return None
+            raw = await response.json()
+    except Exception:
+        logging.exception("Не удалось получить BingX contracts")
+        return None
+
+    if str(raw.get("code")) not in {"0", "200"}:
+        logging.warning("BingX contracts API error: %s", str(raw)[:180])
+        return None
+    data = raw.get("data", [])
+    if isinstance(data, dict):
+        data = [data]
+    symbols = []
+    seen = set()
+    for item in data:
+        raw_symbol = str(item.get("symbol", "")).upper().replace("_", "-")
+        if not raw_symbol.endswith("-USDT"):
+            continue
+        symbol = compact_symbol(raw_symbol)
+        if symbol in seen:
+            continue
+        seen.add(symbol)
+        symbols.append(symbol)
+        if len(symbols) >= limit:
+            break
+    return symbols or None
+
+
+async def fetch_bingx_klines(session: aiohttp.ClientSession, symbol: str, interval: str, limit: int) -> Optional[list[dict[str, float]]]:
+    contract_symbol = bingx_symbol(symbol)
+    # Основной актуальный endpoint BingX для USDT-M Perpetual Futures klines.
+    urls = [
+        f"{BINGX_API_BASE}/openApi/swap/v3/quote/klines",
+        f"{BINGX_API_BASE}/openApi/swap/v2/quote/klines",
+    ]
+    last_raw = None
+    for url in urls:
+        params = {"symbol": contract_symbol, "interval": interval, "limit": str(min(limit, 1000))}
+        try:
+            async with session.get(url, params=params, timeout=15) as response:
+                if response.status != 200:
+                    text = await response.text()
+                    logging.warning("BingX kline HTTP error %s %s: %s", contract_symbol, response.status, text[:160])
+                    continue
+                raw = await response.json()
+                last_raw = raw
+        except Exception:
+            logging.exception("BingX kline request error %s", contract_symbol)
+            continue
+
+        if str(raw.get("code")) not in {"0", "200"}:
+            logging.warning("BingX kline API error %s: %s", contract_symbol, str(raw)[:180])
+            continue
+
+        items = raw.get("data", [])
+        if isinstance(items, dict):
+            # Некоторые версии API могут вернуть data со списком candles внутри.
+            items = items.get("list") or items.get("klines") or items.get("candles") or []
+        candles: list[dict[str, float]] = []
+        for item in items:
+            try:
+                if isinstance(item, dict):
+                    ts = float(item.get("time") or item.get("openTime") or item.get("timestamp") or 0)
+                    candles.append({
+                        "open_time": ts,
+                        "open": float(item.get("open")),
+                        "high": float(item.get("high")),
+                        "low": float(item.get("low")),
+                        "close": float(item.get("close")),
+                        "volume": float(item.get("volume") or item.get("vol") or 0),
+                        "close_time": ts,
+                    })
+                elif isinstance(item, (list, tuple)) and len(item) >= 6:
+                    ts = float(item[0])
+                    candles.append({
+                        "open_time": ts,
+                        "open": float(item[1]),
+                        "high": float(item[2]),
+                        "low": float(item[3]),
+                        "close": float(item[4]),
+                        "volume": float(item[5]) if len(item) > 5 else 0.0,
+                        "close_time": ts,
+                    })
+            except Exception:
+                continue
+        candles = [c for c in candles if c["open"] > 0 and c["high"] > 0 and c["low"] > 0 and c["close"] > 0]
+        candles.sort(key=lambda c: c["open_time"])
+        if len(candles) >= 80:
+            return candles[-limit:]
+    if last_raw is not None:
+        logging.warning("BingX no usable candles %s: %s", contract_symbol, str(last_raw)[:180])
+    return None
 
 
 def bybit_interval(interval: str) -> str:
@@ -731,14 +1196,16 @@ async def fetch_klines(session: aiohttp.ClientSession, symbol: str, interval: st
     try:
         if MARKET_DATA_PROVIDER == "mexc":
             return await fetch_mexc_klines(session, symbol, interval, limit)
+        if MARKET_DATA_PROVIDER == "bingx":
+            return await fetch_bingx_klines(session, symbol, interval, limit)
         if MARKET_DATA_PROVIDER == "okx":
             return await fetch_okx_klines(session, symbol, interval, limit)
         if MARKET_DATA_PROVIDER == "bybit":
             return await fetch_bybit_klines(session, symbol, interval, limit)
         if MARKET_DATA_PROVIDER == "binance":
             return await fetch_binance_klines(session, symbol, interval, limit)
-        # auto: MEXC first, then OKX, then Bybit, then Binance.
-        for fetcher in (fetch_mexc_klines, fetch_okx_klines, fetch_bybit_klines, fetch_binance_klines):
+        # auto: MEXC first, then BingX, then OKX, then Bybit, then Binance.
+        for fetcher in (fetch_mexc_klines, fetch_bingx_klines, fetch_okx_klines, fetch_bybit_klines, fetch_binance_klines):
             data = await fetcher(session, symbol, interval, limit)
             if data:
                 return data
@@ -976,7 +1443,280 @@ async def broadcast_signal(bot: Bot, candidate: SignalCandidate) -> tuple[int, i
     return sent_count, failed_count
 
 
-async def run_auto_scan_once(bot: Bot, ignore_cooldown: bool = False) -> tuple[ScanResult, list[SignalCandidate], list[SignalCandidate]]:
+def autotrading_is_enabled() -> bool:
+    return AUTO_TRADE_MODE in {"paper", "live"}
+
+
+async def fetch_klines_for_exchange(session: aiohttp.ClientSession, exchange: str, symbol: str, interval: str, limit: int) -> Optional[list[dict[str, float]]]:
+    exchange_value = exchange.lower()
+    try:
+        if exchange_value == "mexc":
+            return await fetch_mexc_klines(session, symbol, interval, limit)
+        if exchange_value == "bingx":
+            return await fetch_bingx_klines(session, symbol, interval, limit)
+    except Exception:
+        logging.exception("Ошибка запроса цены для активной сделки %s %s", exchange, symbol)
+    return None
+
+
+def trade_target_price(trade: dict[str, Any]) -> Optional[float]:
+    tps = trade.get("take_profits") or []
+    try:
+        tp_index = int(trade.get("tp_index", AUTO_CLOSE_TP_INDEX))
+        if 1 <= tp_index <= len(tps):
+            return float(tps[tp_index - 1])
+    except Exception:
+        return None
+    return None
+
+
+def trade_exit_reason(trade: dict[str, Any], last_price: float) -> Optional[str]:
+    side = str(trade.get("side", "")).upper()
+    stop = float(trade.get("stop", 0))
+    target = trade_target_price(trade)
+    if side == "LONG":
+        if last_price <= stop:
+            return "SL"
+        if target is not None and last_price >= target:
+            return f"TP{int(trade.get('tp_index', AUTO_CLOSE_TP_INDEX))}"
+    if side == "SHORT":
+        if last_price >= stop:
+            return "SL"
+        if target is not None and last_price <= target:
+            return f"TP{int(trade.get('tp_index', AUTO_CLOSE_TP_INDEX))}"
+    return None
+
+
+def create_ccxt_exchange(exchange_name: str):
+    exchange_value = exchange_name.lower()
+    keys = load_api_keys().get(exchange_value, {})
+    api_key = keys.get("api_key", "")
+    api_secret = keys.get("api_secret", "")
+    config = {
+        "apiKey": api_key,
+        "secret": api_secret,
+        "enableRateLimit": True,
+        "options": {"defaultType": "swap"},
+    }
+    if exchange_value == "mexc":
+        return ccxt.mexc(config)
+    if exchange_value == "bingx":
+        return ccxt.bingx(config)
+    raise ValueError(f"Биржа {exchange_name} не поддерживается для автоторговли")
+
+
+def ccxt_symbol_candidates(symbol: str) -> tuple[str, str]:
+    clean = compact_symbol(symbol)
+    quote = "USDT" if clean.endswith("USDT") else "USDC" if clean.endswith("USDC") else "USDT"
+    base = clean[:-len(quote)] if clean.endswith(quote) else clean
+    return base, quote
+
+
+async def find_ccxt_market_symbol(exchange, symbol: str) -> str:
+    await exchange.load_markets()
+    base, quote = ccxt_symbol_candidates(symbol)
+    preferred = [
+        f"{base}/{quote}:{quote}",
+        f"{base}/{quote}",
+        f"{base}_{quote}",
+        f"{base}-{quote}",
+        f"{base}{quote}",
+    ]
+    for candidate in preferred:
+        if candidate in exchange.markets:
+            return candidate
+    for market_symbol, market in exchange.markets.items():
+        try:
+            if str(market.get("base", "")).upper() == base and str(market.get("quote", "")).upper() == quote:
+                if market.get("swap") or market.get("future") or market.get("linear"):
+                    return market_symbol
+        except Exception:
+            continue
+    raise ValueError(f"Пара {symbol} не найдена в CCXT markets для {exchange.id}")
+
+
+async def execute_live_order(exchange_name: str, symbol: str, side: str, amount: float, reduce_only: bool = False) -> dict[str, Any]:
+    exchange = create_ccxt_exchange(exchange_name)
+    try:
+        market_symbol = await find_ccxt_market_symbol(exchange, symbol)
+        amount_precise = float(exchange.amount_to_precision(market_symbol, amount))
+        if amount_precise <= 0:
+            raise ValueError("Размер ордера получился 0 после округления биржи")
+        order_side = side.lower()
+        params = {"reduceOnly": reduce_only}
+        order = await exchange.create_order(market_symbol, "market", order_side, amount_precise, None, params)
+        return {
+            "market_symbol": market_symbol,
+            "amount": amount_precise,
+            "order": order,
+        }
+    finally:
+        try:
+            await exchange.close()
+        except Exception:
+            pass
+
+
+async def open_autotrade_for_signal(bot: Bot, candidate: SignalCandidate) -> Optional[dict[str, Any]]:
+    if not autotrading_is_enabled():
+        return None
+
+    exchange_value = MARKET_DATA_PROVIDER
+    symbol = candidate.symbol
+
+    if active_trade_for_symbol(symbol, exchange_value):
+        await broadcast_to_admins(bot, f"ℹ️ Автоторговля: по {html.escape(display_symbol(symbol))} уже есть открытая сделка, новую не открываю.")
+        return None
+
+    open_trades = get_open_trades()
+    if len(open_trades) >= MAX_ACTIVE_TRADES:
+        await broadcast_to_admins(bot, f"⛔️ Автоторговля: лимит открытых сделок {MAX_ACTIVE_TRADES}, новую не открываю.")
+        return None
+
+    if AUTO_TRADE_MODE == "live" and not has_api_keys(exchange_value):
+        await broadcast_to_admins(
+            bot,
+            "⛔️ LIVE-автоторговля не открыла сделку: нет API ключей для текущей биржи.\n"
+            "Добавь ключи командой /api_set или переключи режим в PAPER."
+        )
+        return None
+
+    # В целях безопасности TRADE_MARGIN_USDT трактуется как максимальный USDT-объём позиции.
+    # При плече на бирже фактическая маржа может отличаться, поэтому начинай с минимальных сумм.
+    notional_usdt = float(TRADE_MARGIN_USDT)
+    amount = notional_usdt / candidate.entry
+    trade_id = uuid.uuid4().hex[:12]
+    trade = {
+        "id": trade_id,
+        "status": "open",
+        "mode": AUTO_TRADE_MODE,
+        "exchange": exchange_value,
+        "symbol": symbol,
+        "display_symbol": display_symbol(symbol),
+        "side": candidate.side,
+        "probability": candidate.probability,
+        "timeframe": candidate.timeframe,
+        "entry": candidate.entry,
+        "stop": candidate.stop,
+        "take_profits": candidate.take_profits,
+        "tp_index": AUTO_CLOSE_TP_INDEX,
+        "notional_usdt": notional_usdt,
+        "amount": amount,
+        "opened_at": time.time(),
+        "open_order_id": "paper",
+    }
+
+    try:
+        if AUTO_TRADE_MODE == "live":
+            order_side = "buy" if candidate.side == "LONG" else "sell"
+            result = await execute_live_order(exchange_value, symbol, order_side, amount, reduce_only=False)
+            trade["amount"] = result["amount"]
+            trade["ccxt_symbol"] = result["market_symbol"]
+            trade["open_order_id"] = str((result.get("order") or {}).get("id") or "live")
+        trades = load_trades()
+        trades.append(trade)
+        save_trades(trades)
+        await broadcast_to_admins(
+            bot,
+            "💰 <b>Авто-сделка открыта</b>\n"
+            f"Режим: <b>{html.escape(AUTO_TRADE_MODE.upper())}</b>\n"
+            f"Биржа: <b>{html.escape(exchange_label(exchange_value))}</b>\n"
+            f"Пара: <b>{html.escape(display_symbol(symbol))}</b>\n"
+            f"Сторона: <b>{candidate.side}</b>\n"
+            f"Объём/маржа лимит: <b>${notional_usdt:g}</b>\n"
+            f"Amount: <b>{html.escape(str(trade['amount']))}</b>\n"
+            f"Закрытие: <b>SL или TP{AUTO_CLOSE_TP_INDEX}</b>"
+        )
+        return trade
+    except Exception as exc:
+        logging.exception("Не удалось открыть авто-сделку")
+        await broadcast_to_admins(bot, f"⚠️ Не удалось открыть авто-сделку: <code>{html.escape(str(exc))}</code>")
+        return None
+
+
+async def close_autotrade(bot: Bot, trade: dict[str, Any], reason: str, last_price: float) -> bool:
+    trades = load_trades()
+    found = False
+    for item in trades:
+        if item.get("id") == trade.get("id") and item.get("status") == "open":
+            found = True
+            break
+    if not found:
+        return False
+
+    try:
+        if str(trade.get("mode")) == "live":
+            close_side = "sell" if str(trade.get("side")).upper() == "LONG" else "buy"
+            await execute_live_order(
+                str(trade.get("exchange")),
+                str(trade.get("symbol")),
+                close_side,
+                float(trade.get("amount", 0)),
+                reduce_only=True,
+            )
+
+        now = time.time()
+        for item in trades:
+            if item.get("id") == trade.get("id") and item.get("status") == "open":
+                item["status"] = "closed"
+                item["closed_at"] = now
+                item["close_reason"] = reason
+                item["close_price"] = last_price
+                break
+        save_trades(trades)
+
+        pnl_pct = pct_from_entry(last_price, float(trade.get("entry", last_price)))
+        if str(trade.get("side")).upper() == "SHORT":
+            pnl_pct = -pnl_pct
+        await broadcast_to_admins(
+            bot,
+            "✅ <b>Авто-сделка закрыта</b>\n"
+            f"Пара: <b>{html.escape(str(trade.get('display_symbol') or trade.get('symbol')))}</b>\n"
+            f"Сторона: <b>{html.escape(str(trade.get('side')))}</b>\n"
+            f"Причина: <b>{html.escape(reason)}</b>\n"
+            f"Цена закрытия: <b>{html.escape(fmt_price(last_price))}</b>\n"
+            f"PnL примерно: <b>{html.escape(fmt_pct(pnl_pct))}</b>"
+        )
+        return True
+    except Exception as exc:
+        logging.exception("Не удалось закрыть авто-сделку")
+        await broadcast_to_admins(bot, f"⚠️ Не удалось закрыть авто-сделку {html.escape(str(trade.get('symbol')))}: <code>{html.escape(str(exc))}</code>")
+        return False
+
+
+async def trade_monitor_worker(bot: Bot) -> None:
+    await asyncio.sleep(15)
+    while True:
+        try:
+            open_trades = get_open_trades()
+            if open_trades:
+                async with aiohttp.ClientSession() as session:
+                    for trade in open_trades:
+                        candles = await fetch_klines_for_exchange(
+                            session,
+                            str(trade.get("exchange", MARKET_DATA_PROVIDER)),
+                            str(trade.get("symbol")),
+                            SIGNAL_TIMEFRAME,
+                            100,
+                        )
+                        if not candles:
+                            continue
+                        last_price = float(candles[-1]["close"])
+                        reason = trade_exit_reason(trade, last_price)
+                        if reason:
+                            await close_autotrade(bot, trade, reason, last_price)
+                        await asyncio.sleep(0.15)
+        except Exception:
+            logging.exception("Ошибка мониторинга авто-сделок")
+            await broadcast_to_admins(bot, "⚠️ Ошибка мониторинга авто-сделок. Проверь Railway Logs.")
+        await asyncio.sleep(max(5, TRADE_MONITOR_INTERVAL_SECONDS))
+
+
+async def run_auto_scan_once(
+    bot: Bot,
+    ignore_cooldown: bool = False,
+    allow_trading: bool = True,
+) -> tuple[ScanResult, list[SignalCandidate], list[SignalCandidate]]:
     scan = await scan_market_detailed()
     sent_candidates: list[SignalCandidate] = []
     skipped_by_cooldown: list[SignalCandidate] = []
@@ -989,6 +1729,8 @@ async def run_auto_scan_once(bot: Bot, ignore_cooldown: bool = False) -> tuple[S
             mark_sent(candidate)
             sent_candidates.append(candidate)
             logging.info("Авто-сигнал отправлен %s %s %s%% sent=%s failed=%s", candidate.symbol, candidate.side, candidate.probability, sent_count, failed_count)
+            if allow_trading:
+                await open_autotrade_for_signal(bot, candidate)
     return scan, sent_candidates, skipped_by_cooldown
 
 
@@ -996,7 +1738,7 @@ async def auto_signal_worker(bot: Bot) -> None:
     if not AUTO_SIGNALS_ENABLED:
         logging.info("AUTO_SIGNALS_ENABLED=false, авто-сканер выключен")
         return
-    logging.info("Авто-сканер включён: provider=%s symbols_mode=%s timeframe=%s interval=%ss threshold=%s%%", MARKET_DATA_PROVIDER, "MEXC_TOP_100" if MEXC_DYNAMIC_TOP_SYMBOLS and not USE_ENV_SYMBOLS else ",".join(SYMBOLS), SIGNAL_TIMEFRAME, SCAN_INTERVAL_SECONDS, MIN_SIGNAL_PROBABILITY)
+    logging.info("Авто-сканер включён: provider=%s symbols_mode=%s timeframe=%s interval=%ss threshold=%s%%", MARKET_DATA_PROVIDER, symbols_mode_text(), SIGNAL_TIMEFRAME, SCAN_INTERVAL_SECONDS, MIN_SIGNAL_PROBABILITY)
     await asyncio.sleep(8)
     scan_number = 0
     while True:
@@ -1016,6 +1758,63 @@ async def auto_signal_worker(bot: Bot) -> None:
             if AUTO_SCAN_REPORTS_TO_ADMINS:
                 await broadcast_to_admins(bot, "⚠️ Ошибка авто-сканера. Проверь Railway Logs.")
         await asyncio.sleep(SCAN_INTERVAL_SECONDS)
+
+
+async def scan_single_symbol(symbol: str) -> tuple[Optional[SignalCandidate], bool]:
+    normalized = normalize_user_symbol(symbol)
+    if not normalized:
+        return None, False
+    async with aiohttp.ClientSession() as session:
+        candles = await fetch_klines(session, normalized, SIGNAL_TIMEFRAME, KLINES_LIMIT)
+    if not candles:
+        return None, False
+    return analyze_candles(normalized, candles), True
+
+
+async def answer_single_symbol_scan(message: Message, symbol_text: str) -> None:
+    normalized = normalize_user_symbol(symbol_text)
+    if not normalized:
+        await message.answer("Не понял монету. Напиши, например: <code>BTC</code>, <code>XMR</code> или <code>BTCUSDT</code>.")
+        return
+    progress = await message.answer(f"🔎 Сканирую <b>{html.escape(display_symbol(normalized))}</b> на {html.escape(exchange_label())}...")
+    try:
+        candidate, has_data = await scan_single_symbol(normalized)
+    except Exception as exc:
+        logging.exception("Ошибка скана одной монеты")
+        await progress.edit_text(f"Ошибка скана <b>{html.escape(display_symbol(normalized))}</b>: <code>{html.escape(str(exc))}</code>")
+        return
+
+    if not has_data:
+        await progress.edit_text(
+            f"Не получил данные по <b>{html.escape(display_symbol(normalized))}</b> на <b>{html.escape(exchange_label())}</b>.\n\n"
+            "Проверь, есть ли эта пара на выбранной бирже, или переключи биржу в /settings."
+        )
+        return
+
+    if not candidate:
+        await progress.edit_text(
+            f"🔎 <b>{html.escape(display_symbol(normalized))}</b> просканирована.\n\n"
+            f"Биржа: <b>{html.escape(exchange_label())}</b>\n"
+            f"Таймфрейм: <b>{html.escape(SIGNAL_TIMEFRAME)}</b>\n\n"
+            "Сильного LONG/SHORT сетапа по текущей логике нет. Лучше подождать."
+        )
+        return
+
+    reasons_text = "\n".join(f"• {reason}" for reason in candidate.reasons) if candidate.reasons else "• технический скоринг"
+    text = structured_signal_text(
+        symbol=display_symbol(candidate.symbol),
+        side=candidate.side,
+        probability=candidate.probability,
+        entry=candidate.entry,
+        stop=candidate.stop,
+        take_profits=candidate.take_profits,
+        comment=reasons_text,
+        timeframe=candidate.timeframe,
+        auto=False,
+    )
+    if candidate.probability < MIN_SIGNAL_PROBABILITY:
+        text += f"\n\nℹ️ Ниже порога автоотправки: {candidate.probability}% < {MIN_SIGNAL_PROBABILITY}%."
+    await progress.edit_text(text)
 
 
 # ---------- Telegram handlers ----------
@@ -1045,7 +1844,11 @@ async def cmd_help(message: Message) -> None:
             "\n\n<b>Команды админа:</b>\n"
             "• /scan — запустить авто-скан сейчас\n"
             "• /status — настройки авто-сканера\n"
-            "• /settings — кнопки настроек авто-сканера\n"
+            "• /settings — кнопки настроек авто-сканера и автоторговли\n"
+            "• /api — API ключи для LIVE-торговли\n"
+            "• /margin 10 — маржа/объём на сделку в USDT\n"
+            "• /trades — активные авто-сделки\n"
+            "• отправь BTC, XMR или BTCUSDT — скан одной монеты\n"
             "• /signal — ручной сигнал\n\n"
             "Ручной формат:\n"
             "<code>/signal TRX LONG 82 0.3235 0.3195 0.3265 0.3290 0.3320 Комментарий</code>"
@@ -1059,6 +1862,9 @@ async def cmd_help(message: Message) -> None:
         "• /stop — отписаться\n"
         "• /status — статус бота\n"
         "• /settings — настройки бота через кнопки\n"
+        "• /api — API ключи для автоторговли\n"
+        "• /trades — активные авто-сделки\n"
+        "• отправь название монеты, например BTC или XMR, — я просканирую её отдельно\n"
         "• /id — показать Telegram ID"
         f"{admin_help}",
         reply_markup=keyboard,
@@ -1089,9 +1895,14 @@ async def cmd_status(message: Message) -> None:
         f"Таймфрейм: <b>{html.escape(SIGNAL_TIMEFRAME)}</b>\n"
         f"Интервал скана: <b>{SCAN_INTERVAL_SECONDS} сек.</b>\n"
         f"Cooldown: <b>{SIGNAL_COOLDOWN_MINUTES} мин.</b>\n"
-        f"Источник данных: <b>{html.escape(MARKET_DATA_PROVIDER.upper())} Futures</b>\n"
+        f"Источник данных: <b>{html.escape(exchange_label())}</b>\n"
+        f"Автоторговля: <b>{html.escape(autotrade_label())}</b>\n"
+        f"API текущей биржи: <b>{'есть' if has_api_keys(MARKET_DATA_PROVIDER) else 'нет'}</b>\n"
+        f"Маржа/объём сделки: <b>${TRADE_MARGIN_USDT:g}</b>\n"
+        f"Авто-закрытие: <b>SL или TP{AUTO_CLOSE_TP_INDEX}</b>\n"
+        f"Открытых авто-сделок: <b>{len(get_open_trades())}</b> / {MAX_ACTIVE_TRADES}\n"
         f"Отчёты админу: <b>{'включены' if AUTO_SCAN_REPORTS_TO_ADMINS else 'выключены'}</b>\n"
-        f"Режим монет: <b>{'топ ' + str(MEXC_SYMBOLS_LIMIT) + ' MEXC Futures по 24h обороту' if MARKET_DATA_PROVIDER == 'mexc' and MEXC_DYNAMIC_TOP_SYMBOLS and not USE_ENV_SYMBOLS else 'фиксированный список'}</b>\n"
+        f"Режим монет: <b>{html.escape(symbols_mode_text())}</b>\n"
         f"Фолбэк-монет: <b>{len(SYMBOLS)}</b>\n"
         f"Фолбэк-список: <code>{html.escape(','.join(SYMBOLS[:40]))}{'...' if len(SYMBOLS) > 40 else ''}</code>\n"
         f"Подписчиков: <b>{len(subscribers)}</b>\n"
@@ -1108,9 +1919,108 @@ async def cmd_settings(message: Message) -> None:
     await message.answer(settings_menu_text(), reply_markup=settings_keyboard())
 
 
+@dp.message(Command("api"))
+async def cmd_api(message: Message) -> None:
+    if not is_admin(message.from_user.id):
+        await message.answer("API настройки доступны только админу.")
+        return
+    await message.answer(api_status_text(), reply_markup=api_keyboard())
+
+
+@dp.message(Command("api_set"))
+async def cmd_api_set(message: Message, command: CommandObject) -> None:
+    if not is_admin(message.from_user.id):
+        await message.answer("API настройки доступны только админу.")
+        return
+    if not command.args:
+        await message.answer(
+            "Формат:\n"
+            "<code>/api_set MEXC API_KEY API_SECRET</code>\n"
+            "<code>/api_set BINGX API_KEY API_SECRET</code>\n\n"
+            "Нужны права Read + Trade. Withdraw/вывод средств не включай."
+        )
+        return
+
+    parts = command.args.split()
+    if len(parts) < 3:
+        await message.answer("Недостаточно данных. Нужно: биржа, API key, API secret.")
+        return
+    exchange = parts[0].strip().lower()
+    if exchange not in EXCHANGE_OPTIONS:
+        await message.answer("Биржа должна быть MEXC или BINGX.")
+        return
+    api_key = parts[1].strip()
+    api_secret = parts[2].strip()
+    if len(api_key) < 6 or len(api_secret) < 6:
+        await message.answer("Ключи выглядят слишком короткими. Проверь API key и API secret.")
+        return
+
+    keys = load_api_keys()
+    keys[exchange] = {"api_key": api_key, "api_secret": api_secret}
+    save_api_keys(keys)
+
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    await message.answer(
+        f"✅ API ключи для <b>{html.escape(exchange_label(exchange))}</b> сохранены.\n"
+        "Для запуска реальных ордеров включи режим LIVE в /settings → Автоторговля.\n\n"
+        "Важно: ключ должен быть без права вывода средств."
+    )
+
+
+@dp.message(Command("api_clear"))
+async def cmd_api_clear(message: Message, command: CommandObject) -> None:
+    if not is_admin(message.from_user.id):
+        await message.answer("API настройки доступны только админу.")
+        return
+    exchange = (command.args or MARKET_DATA_PROVIDER).strip().lower()
+    if exchange == "all":
+        save_api_keys({})
+        await message.answer("🧹 Все API ключи очищены.")
+        return
+    if exchange not in EXCHANGE_OPTIONS:
+        await message.answer("Формат: <code>/api_clear MEXC</code>, <code>/api_clear BINGX</code> или <code>/api_clear all</code>.")
+        return
+    keys = load_api_keys()
+    keys.pop(exchange, None)
+    save_api_keys(keys)
+    await message.answer(f"🧹 API ключи для {html.escape(exchange_label(exchange))} очищены.")
+
+
+@dp.message(Command("margin"))
+async def cmd_margin(message: Message, command: CommandObject) -> None:
+    global TRADE_MARGIN_USDT
+    if not is_admin(message.from_user.id):
+        await message.answer("Настройка доступна только админу.")
+        return
+    if not command.args:
+        await message.answer(f"Текущая маржа/объём на сделку: <b>${TRADE_MARGIN_USDT:g}</b>\nПример: <code>/margin 10</code>")
+        return
+    try:
+        value = float(command.args.strip().replace(",", "."))
+    except ValueError:
+        await message.answer("Сумма должна быть числом. Пример: <code>/margin 10</code>")
+        return
+    TRADE_MARGIN_USDT = max(1.0, min(10000.0, value))
+    save_runtime_settings()
+    await message.answer(f"✅ Маржа/объём на сделку установлен: <b>${TRADE_MARGIN_USDT:g}</b>")
+
+
+@dp.message(Command("trades"))
+async def cmd_trades(message: Message) -> None:
+    if not is_admin(message.from_user.id):
+        await message.answer("Список сделок доступен только админу.")
+        return
+    await message.answer(trades_status_text())
+
+
 @dp.callback_query(F.data.startswith("settings:"))
 async def settings_callback(callback: CallbackQuery) -> None:
-    global SIGNAL_TIMEFRAME, MIN_SIGNAL_PROBABILITY, SCAN_INTERVAL_SECONDS
+    global SIGNAL_TIMEFRAME, MIN_SIGNAL_PROBABILITY, SCAN_INTERVAL_SECONDS, MARKET_DATA_PROVIDER
+    global AUTO_TRADE_MODE, TRADE_MARGIN_USDT, AUTO_CLOSE_TP_INDEX
 
     if callback.from_user is None or not is_admin(callback.from_user.id):
         await callback.answer("Только админ может менять настройки", show_alert=True)
@@ -1124,6 +2034,14 @@ async def settings_callback(callback: CallbackQuery) -> None:
 
     if data == "settings:menu":
         await message.edit_text(settings_menu_text(), reply_markup=settings_keyboard())
+        await callback.answer()
+        return
+
+    if data == "settings:exchange":
+        await message.edit_text(
+            f"<b>🏦 Выбери биржу</b>\n\nСейчас: <b>{html.escape(exchange_label())}</b>",
+            reply_markup=exchange_keyboard(),
+        )
         await callback.answer()
         return
 
@@ -1149,6 +2067,84 @@ async def settings_callback(callback: CallbackQuery) -> None:
             reply_markup=interval_keyboard(),
         )
         await callback.answer()
+        return
+
+    if data == "settings:autotrade":
+        await message.edit_text(
+            "<b>💰 Автоторговля</b>\n\n"
+            f"Режим: <b>{html.escape(autotrade_label())}</b>\n"
+            f"Маржа/объём сделки: <b>${TRADE_MARGIN_USDT:g}</b>\n"
+            f"Авто-закрытие: <b>SL или TP{AUTO_CLOSE_TP_INDEX}</b>\n"
+            f"Открытых сделок: <b>{len(get_open_trades())}</b>\n\n"
+            "OFF — только сигналы. PAPER — тест без ордеров. LIVE — реальные рыночные ордера по API.",
+            reply_markup=autotrade_keyboard(),
+        )
+        await callback.answer()
+        return
+
+    if data == "settings:trade_margin":
+        await message.edit_text(
+            f"<b>💵 Выбери маржу/объём на сделку</b>\n\nСейчас: <b>${TRADE_MARGIN_USDT:g}</b>\n\n"
+            "Бот не будет открывать позицию больше этой суммы в USDT по своей логике.",
+            reply_markup=trade_margin_keyboard(),
+        )
+        await callback.answer()
+        return
+
+    if data == "settings:trade_margin_custom":
+        await message.edit_text(
+            "✍️ Чтобы задать свою сумму, отправь команду:\n"
+            "<code>/margin 15</code>\n\n"
+            "Пример выше установит $15 на сделку.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:autotrade")]]),
+        )
+        await callback.answer()
+        return
+
+    if data == "settings:close_tp":
+        await message.edit_text(
+            f"<b>🎯 Выбери тейк для авто-закрытия</b>\n\nСейчас: <b>TP{AUTO_CLOSE_TP_INDEX}</b>\n\n"
+            "Если цена дойдёт до выбранного TP или до SL, бот закроет всю авто-сделку.",
+            reply_markup=close_tp_keyboard(),
+        )
+        await callback.answer()
+        return
+
+    if data == "settings:trades":
+        await message.edit_text(
+            trades_status_text(),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:autotrade")]]),
+        )
+        await callback.answer()
+        return
+
+    if data == "settings:api":
+        await message.edit_text(api_status_text(), reply_markup=api_keyboard())
+        await callback.answer()
+        return
+
+    if data == "settings:api_help":
+        await message.edit_text(api_status_text(), reply_markup=api_keyboard())
+        await callback.answer()
+        return
+
+    if data == "settings:api_clear_current":
+        keys = load_api_keys()
+        keys.pop(MARKET_DATA_PROVIDER, None)
+        save_api_keys(keys)
+        await message.edit_text(api_status_text(), reply_markup=api_keyboard())
+        await callback.answer("Ключи текущей биржи очищены")
+        return
+
+    if data.startswith("settings:set_exchange:"):
+        value = data.split(":", 2)[2].lower()
+        if value in EXCHANGE_OPTIONS:
+            MARKET_DATA_PROVIDER = value
+            save_runtime_settings()
+            await message.edit_text(settings_menu_text(), reply_markup=settings_keyboard())
+            await callback.answer(f"Биржа: {exchange_label(value)}")
+        else:
+            await callback.answer("Неверная биржа", show_alert=True)
         return
 
     if data.startswith("settings:set_timeframe:"):
@@ -1192,6 +2188,47 @@ async def settings_callback(callback: CallbackQuery) -> None:
             await callback.answer("Неверный интервал", show_alert=True)
         return
 
+    if data.startswith("settings:set_autotrade_mode:"):
+        value = data.split(":", 2)[2].lower()
+        if value in AUTO_TRADE_MODE_OPTIONS:
+            if value == "live" and not has_api_keys(MARKET_DATA_PROVIDER):
+                await callback.answer("Сначала добавь API ключи для выбранной биржи", show_alert=True)
+                return
+            AUTO_TRADE_MODE = value
+            save_runtime_settings()
+            await message.edit_text(settings_menu_text(), reply_markup=settings_keyboard())
+            await callback.answer(f"Автоторговля: {autotrade_label()}")
+        else:
+            await callback.answer("Неверный режим", show_alert=True)
+        return
+
+    if data.startswith("settings:set_trade_margin:"):
+        try:
+            value = float(data.split(":", 2)[2])
+        except ValueError:
+            await callback.answer("Неверная сумма", show_alert=True)
+            return
+        TRADE_MARGIN_USDT = max(1.0, min(10000.0, value))
+        save_runtime_settings()
+        await message.edit_text(settings_menu_text(), reply_markup=settings_keyboard())
+        await callback.answer(f"Маржа/объём: ${TRADE_MARGIN_USDT:g}")
+        return
+
+    if data.startswith("settings:set_close_tp:"):
+        try:
+            value = int(data.split(":", 2)[2])
+        except ValueError:
+            await callback.answer("Неверный TP", show_alert=True)
+            return
+        if value in AUTO_CLOSE_TP_OPTIONS:
+            AUTO_CLOSE_TP_INDEX = value
+            save_runtime_settings()
+            await message.edit_text(settings_menu_text(), reply_markup=settings_keyboard())
+            await callback.answer(f"Закрытие по TP{value}")
+        else:
+            await callback.answer("Неверный TP", show_alert=True)
+        return
+
     if data == "settings:close":
         await message.edit_text("Настройки закрыты.")
         await callback.answer()
@@ -1207,7 +2244,7 @@ async def cmd_scan(message: Message, bot: Bot) -> None:
         return
     progress = await message.answer("🧪 Запускаю ручной авто-скан рынка...")
     try:
-        scan, sent_candidates, skipped = await run_auto_scan_once(bot, ignore_cooldown=True)
+        scan, sent_candidates, skipped = await run_auto_scan_once(bot, ignore_cooldown=True, allow_trading=False)
     except Exception as exc:
         logging.exception("Ошибка ручного скана")
         await progress.edit_text(f"Ошибка скана: <code>{html.escape(str(exc))}</code>")
@@ -1325,6 +2362,25 @@ async def button_settings(message: Message) -> None:
     await cmd_settings(message)
 
 
+@dp.message(F.text == "💰 Автоторговля")
+async def button_autotrade(message: Message) -> None:
+    if not is_admin(message.from_user.id):
+        await message.answer("Настройки автоторговли доступны только админу.")
+        return
+    await message.answer(
+        "<b>💰 Автоторговля</b>\n\n"
+        f"Режим: <b>{html.escape(autotrade_label())}</b>\n"
+        f"Маржа/объём сделки: <b>${TRADE_MARGIN_USDT:g}</b>\n"
+        f"Авто-закрытие: <b>SL или TP{AUTO_CLOSE_TP_INDEX}</b>",
+        reply_markup=autotrade_keyboard(),
+    )
+
+
+@dp.message(F.text == "🔑 API")
+async def button_api(message: Message) -> None:
+    await cmd_api(message)
+
+
 @dp.message(F.text == "🔕 Отписаться")
 async def button_stop(message: Message) -> None:
     await cmd_stop(message)
@@ -1332,7 +2388,11 @@ async def button_stop(message: Message) -> None:
 
 @dp.message()
 async def fallback(message: Message) -> None:
-    await message.answer("Я понял сообщение, но команды такой нет. Нажми /help.", reply_markup=keyboard)
+    text = (message.text or "").strip()
+    if text and is_symbol_query(text):
+        await answer_single_symbol_scan(message, text)
+        return
+    await message.answer("Я понял сообщение, но команды такой нет. Чтобы просканировать монету, напиши, например: BTC или XMR. Для команд нажми /help.", reply_markup=keyboard)
 
 
 async def main() -> None:
@@ -1342,14 +2402,17 @@ async def main() -> None:
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     await bot.delete_webhook(drop_pending_updates=True)
     worker_task = asyncio.create_task(auto_signal_worker(bot))
+    trade_monitor_task = asyncio.create_task(trade_monitor_worker(bot))
     try:
         await dp.start_polling(bot)
     finally:
         worker_task.cancel()
-        try:
-            await worker_task
-        except asyncio.CancelledError:
-            pass
+        trade_monitor_task.cancel()
+        for task in (worker_task, trade_monitor_task):
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         await bot.session.close()
 
 
