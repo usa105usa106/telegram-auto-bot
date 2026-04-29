@@ -7,6 +7,7 @@ import math
 import os
 import time
 import uuid
+import fcntl
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Set
@@ -231,6 +232,8 @@ API_KEYS_FILE = DATA_DIR / "api_keys.json"
 TRADES_FILE = DATA_DIR / "trades.json"
 NEURAL_OPTIMIZER_FILE = DATA_DIR / "neural_optimizer.json"
 IMPROVEMENTS_STATS_FILE = DATA_DIR / "trading_improvements_stats.json"
+INSTANCE_LOCK_FILE = DATA_DIR / "bot_instance.lock"
+_INSTANCE_LOCK_HANDLE: Optional[Any] = None
 TRADES_LOCK = asyncio.Lock()
 
 TIMEFRAME_OPTIONS = ["5m", "15m", "30m", "1h", "4h"]
@@ -249,6 +252,41 @@ AUTO_CLOSE_TP_OPTIONS = [1, 2, 3]
 
 def load_runtime_settings() -> dict[str, Any]:
     return load_json(SETTINGS_FILE, {})
+
+
+def acquire_single_instance_lock() -> None:
+    """Защита от запуска нескольких копий одного Telegram-бота.
+
+    Если одновременно живут несколько контейнеров Railway с одним BOT_TOKEN,
+    разные версии кода могут отвечать на один /start и показывать разные
+    настройки: 60%, 80%, 95%. Поэтому оставляем только первый процесс.
+
+    Для Railway желательно подключить Volume на /app/data, чтобы lock-файл был
+    общим между рестартами/деплоями и настройки сохранялись в settings.json.
+    """
+    global _INSTANCE_LOCK_HANDLE
+
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    handle = INSTANCE_LOCK_FILE.open("w")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        logging.error(
+            "Найдена уже запущенная копия бота. "
+            "Останавливаю этот процесс, чтобы не было разных порогов/настроек."
+        )
+        raise SystemExit(0)
+
+    handle.seek(0)
+    handle.truncate()
+    handle.write(
+        f"pid={os.getpid()}\n"
+        f"started_at={int(time.time())}\n"
+        f"railway_deployment_id={os.getenv('RAILWAY_DEPLOYMENT_ID', '')}\n"
+        f"settings_file={SETTINGS_FILE}\n"
+    )
+    handle.flush()
+    _INSTANCE_LOCK_HANDLE = handle
 
 
 def save_runtime_settings() -> None:
@@ -4375,7 +4413,7 @@ async def open_autotrade_for_signal(bot: Bot, candidate: SignalCandidate) -> Opt
         await broadcast_to_admins(
             bot,
             "⛔️ LIVE-автоторговля не открыла сделку: нет API ключей для текущей биржи.\n"
-            "Добавь ключи в Railway Variables или переключи режим в PAPER."
+            "Добавь ключи через /api_set или переключи режим в PAPER."
         )
         return None
 
@@ -6256,6 +6294,8 @@ async def main() -> None:
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN не найден. Добавь переменную BOT_TOKEN в Railway")
     logging.basicConfig(level=logging.INFO)
+    acquire_single_instance_lock()
+    logging.info("Бот запущен. Настройки берутся из %s. Railway Variables: только BOT_TOKEN и ADMIN_IDS.", SETTINGS_FILE)
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     await bot.delete_webhook(drop_pending_updates=True)
     worker_task = asyncio.create_task(auto_signal_worker(bot))
