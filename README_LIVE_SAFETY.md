@@ -109,3 +109,34 @@ MIN_SIGNAL_PROBABILITY=85
 SIGNAL_TIMEFRAME=15m
 TREND_TIMEFRAME=1h
 ```
+
+
+## 🤖 AI-оптимизатор алгоритмов
+
+В этой версии добавлен отдельный переключатель `Нейросети`:
+
+```env
+NEURAL_OPTIMIZER_ENABLED=true
+```
+
+Через Telegram:
+
+```text
+/settings → 🤖 Нейросети
+/neural
+```
+
+Модуль перебирает несколько алгоритмов на свежей истории свечей каждой монеты и выбирает лучший профиль по winrate, profit factor и среднему PnL. Если лучший профиль не проходит пороги, сигнал не отправляется и авто-сделка не открывается.
+
+Рекомендуемые LIVE-настройки:
+
+```env
+NEURAL_OPTIMIZER_ENABLED=true
+NEURAL_OPTIMIZER_STRICT_MODE=true
+NEURAL_OPTIMIZER_MIN_TRADES=6
+NEURAL_OPTIMIZER_MIN_WIN_RATE=0.55
+NEURAL_OPTIMIZER_MIN_PROFIT_FACTOR=1.15
+NEURAL_OPTIMIZER_MIN_AVG_PNL=0.05
+```
+
+Это дополнительный фильтр риска, а не гарантия прибыли.
