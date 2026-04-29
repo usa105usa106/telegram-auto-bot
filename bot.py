@@ -2196,10 +2196,16 @@ def structured_signal_text(
     timeframe: str = "",
     auto: bool = False,
     super_deal: bool = False,
+    manual_analysis: bool = False,
 ) -> str:
     side_clean = side.upper()
     emoji = "🟢" if side_clean == "LONG" else "🔴"
-    title_prefix = "🤖 Авто-сигнал" if auto else "Сигнал"
+    if auto:
+        title_prefix = "🤖 Авто-сигнал"
+    elif manual_analysis:
+        title_prefix = "🔎 Анализ монеты"
+    else:
+        title_prefix = "Сигнал"
     alert_prefix = ""
     if super_deal:
         emoji = "🔴"
@@ -3600,8 +3606,10 @@ def detect_slope_level(candidate: SignalCandidate, candles: list[dict[str, float
                 continue
             kind = "восходящая поддержка" if side == "LONG" else "нисходящее сопротивление"
             direction = "отскок вверх / LONG" if side == "LONG" else "отбой вниз / SHORT"
+            slope_pct_per_candle = slope / close * 100.0 if close else 0.0
             reasons = [
                 f"{kind}: {len(touch_points)} касания, точность R² {r2:.2f}",
+                f"наклон линии: {slope_pct_per_candle:+.4f}% за свечу",
                 f"цена от линии: {distance_atr:.2f} ATR ({distance_pct:.2f}%)",
                 f"тренд совпадает: score {trend_score:+d}",
             ]
@@ -3676,7 +3684,12 @@ def render_slope_level_chart(candidate: SignalCandidate, candles: list[dict[str,
             fontsize=12,
             fontweight="bold",
         )
-        ax.set_title(f"{display_symbol(candidate.symbol)} {candidate.side} · {level.kind} · {level.probability}%")
+        slope_pct_per_candle = level.slope / max(candidate.entry, 1e-12) * 100.0
+        slope_pct_window = ((line_y[-1] - line_y[0]) / line_y[0] * 100.0) if line_y and line_y[0] else 0.0
+        ax.set_title(
+            f"{display_symbol(candidate.symbol)} {candidate.side} · {level.kind} · "
+            f"{level.probability}% · наклон {slope_pct_window:+.2f}% ({slope_pct_per_candle:+.4f}%/св)"
+        )
         ax.set_xlabel(f"Свечи {candidate.timeframe}")
         ax.set_ylabel("Цена")
         ax.grid(True, alpha=0.25)
@@ -3691,6 +3704,138 @@ def render_slope_level_chart(candidate: SignalCandidate, candles: list[dict[str,
         logging.exception("Не удалось построить график наклонного уровня")
         return None
 
+
+
+
+def manual_slope_percent_info(candles: list[dict[str, float]]) -> Optional[dict[str, float]]:
+    """Линейная наклонка для ручного скана: процент за окно и за свечу."""
+    if len(candles) < 5:
+        return None
+    recent = candles[-SLOPE_LEVEL_CHART_CANDLES:]
+    closes = [float(c["close"]) for c in recent]
+    n = len(closes)
+    if n < 5 or closes[-1] <= 0:
+        return None
+    xs = list(range(n))
+    x_mean = sum(xs) / n
+    y_mean = sum(closes) / n
+    denom = sum((x - x_mean) ** 2 for x in xs)
+    if denom <= 0:
+        return None
+    slope = sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, closes)) / denom
+    intercept = y_mean - slope * x_mean
+    line_start = intercept
+    line_end = slope * (n - 1) + intercept
+    if line_start <= 0 or line_end <= 0:
+        return None
+    total_pct = (line_end - line_start) / line_start * 100.0
+    per_candle_pct = total_pct / max(1, n - 1)
+    return {
+        "slope": slope,
+        "intercept": intercept,
+        "line_start": line_start,
+        "line_end": line_end,
+        "total_pct": total_pct,
+        "per_candle_pct": per_candle_pct,
+        "candles": float(n),
+    }
+
+
+def render_manual_slope_percent_chart(candidate: SignalCandidate, candles: list[dict[str, float]]) -> tuple[Optional[bytes], Optional[str]]:
+    """Всегда строит график наклона для ручного ввода монеты, даже если сигнала выше порога нет."""
+    info = manual_slope_percent_info(candles)
+    if info is None:
+        return None, None
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception:
+        logging.exception("matplotlib недоступен, график ручного наклона не создан")
+        return None, None
+
+    try:
+        chart_candles = candles[-int(info["candles"]):]
+        xs = list(range(len(chart_candles)))
+        closes = [float(c["close"]) for c in chart_candles]
+        line_y = [info["slope"] * x + info["intercept"] for x in xs]
+
+        fig, ax = plt.subplots(figsize=(10, 5.6), dpi=130)
+        for x, candle in zip(xs, chart_candles):
+            o = float(candle["open"])
+            h = float(candle["high"])
+            l = float(candle["low"])
+            c = float(candle["close"])
+            color = "#149b68" if c >= o else "#d64b4b"
+            ax.vlines(x, l, h, color=color, linewidth=1.0, alpha=0.85)
+            ax.vlines(x, min(o, c), max(o, c), color=color, linewidth=3.0, alpha=0.95)
+
+        ax.plot(xs, line_y, color="#2f6bff", linewidth=2.2, label="Наклонка / regression")
+        ax.axhline(candidate.entry, color="#777777", linewidth=1.0, linestyle="--", label="Entry")
+        ax.axhline(candidate.stop, color="#d64b4b", linewidth=1.0, linestyle=":", label="SL")
+        if candidate.take_profits:
+            ax.axhline(candidate.take_profits[0], color="#149b68", linewidth=1.0, linestyle=":", label="TP1")
+        ax.annotate(
+            "LONG ↑" if candidate.side.upper() == "LONG" else "SHORT ↓",
+            xy=(xs[-1], closes[-1]),
+            xytext=(xs[-1] + max(3, len(xs) // 12), candidate.take_profits[0] if candidate.take_profits else closes[-1]),
+            arrowprops={"arrowstyle": "->", "linewidth": 2.0, "color": "#111111"},
+            fontsize=12,
+            fontweight="bold",
+        )
+        title = (
+            f"{display_symbol(candidate.symbol)} {candidate.side} · ручной анализ · "
+            f"наклон {info['total_pct']:+.2f}% за {int(info['candles'])} св. "
+            f"({info['per_candle_pct']:+.4f}%/св)"
+        )
+        ax.set_title(title)
+        ax.set_xlabel(f"Свечи {candidate.timeframe}")
+        ax.set_ylabel("Цена")
+        ax.grid(True, alpha=0.25)
+        ax.legend(loc="best")
+        fig.tight_layout()
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png")
+        plt.close(fig)
+        buf.seek(0)
+        reason = (
+            f"📈 Ручная наклонка: {info['total_pct']:+.2f}% за {int(info['candles'])} свечей "
+            f"({info['per_candle_pct']:+.4f}%/свечу)"
+        )
+        return buf.getvalue(), reason
+    except Exception:
+        logging.exception("Не удалось построить график ручного наклона")
+        return None, None
+
+
+def attach_manual_slope_chart(candidate: Optional[SignalCandidate], candles: list[dict[str, float]]) -> Optional[SignalCandidate]:
+    """Добавляет график с наклонкой в процентах к ручному анализу, не меняя авто-логику."""
+    if candidate is None:
+        return None
+    if candidate.slope_chart_png:
+        return candidate
+    chart_png, slope_reason = render_manual_slope_percent_chart(candidate, candles)
+    if not chart_png:
+        return candidate
+    reasons = list(candidate.reasons)
+    if slope_reason:
+        reasons.append(slope_reason)
+    return SignalCandidate(
+        symbol=candidate.symbol,
+        side=candidate.side,
+        probability=candidate.probability,
+        entry=candidate.entry,
+        stop=candidate.stop,
+        take_profits=list(candidate.take_profits),
+        reasons=reasons[:12],
+        timeframe=candidate.timeframe,
+        trend=candidate.trend,
+        ai_optimizer=candidate.ai_optimizer,
+        is_super_deal=candidate.is_super_deal,
+        super_deal_score=candidate.super_deal_score,
+        slope_level=candidate.slope_level,
+        slope_chart_png=chart_png,
+    )
 
 def apply_slope_level_filter(
     candidate: Optional[SignalCandidate],
@@ -3966,11 +4111,16 @@ async def broadcast_to_admins(bot: Bot, text: str) -> None:
 def slope_chart_caption(candidate: SignalCandidate) -> str:
     level = candidate.slope_level
     if level is None:
-        return f"📈 {display_symbol(candidate.symbol)} {candidate.side}"
+        return (
+            f"📈 Ручной график наклона: {display_symbol(candidate.symbol)} {candidate.side}\n"
+            "Наклон линии указан на графике в процентах."
+        )
+    slope_pct_per_candle = level.slope / max(candidate.entry, 1e-12) * 100.0
     return (
         f"📐 Наклонный уровень: {display_symbol(candidate.symbol)} {candidate.side}\n"
         f"Вероятность отработки: {level.probability}%\n"
         f"Тип: {level.kind}\n"
+        f"Наклон: {slope_pct_per_candle:+.4f}%/свечу\n"
         f"Касаний: {level.touches}, расстояние: {level.distance_atr:.2f} ATR"
     )
 
@@ -5108,9 +5258,11 @@ async def scan_single_symbol(symbol: str) -> tuple[Optional[SignalCandidate], bo
     """Скан одной монеты для ручного ввода.
 
     Возвращает: candidate, has_data, candles_count, note.
-    Ручной скан повторяет выбранный режим наклонок:
-    OFF — обычный ручной скан; ONLY — ищет наклонку без общего порога;
-    BOTH — нужен общий порог проходимости и найденная наклонка.
+
+    Важное отличие от авто-скана: ручной ввод монеты всегда показывает анализ
+    и график наклона в процентах, даже если проходимость ниже текущего порога
+    автоотправки или включены строгие фильтры. Порог/фильтры только добавляются
+    в примечание и не блокируют сам ручной анализ.
     """
     normalized = normalize_user_symbol(symbol)
     if not normalized:
@@ -5136,34 +5288,52 @@ async def scan_single_symbol(symbol: str) -> tuple[Optional[SignalCandidate], bo
     if not candles:
         return None, False, 0, ""
 
-    note = ""
+    notes: list[str] = []
     trend: Optional[TrendInfo] = None
     if TREND_FILTER_ENABLED or SUPER_DEAL_ENABLED or BTC_ETH_ONLY_MODE_ENABLED or slope_levels_active():
         trend = analyze_primary_trend(trend_candles, TREND_TIMEFRAME)
 
-    # В режиме «только наклонки» ручной скан берёт даже слабый базовый кандидат,
-    # чтобы найти линию уровня без общего порога. В режиме «порог + наклонки»
-    # слабый кандидат не допускается: оба фильтра должны совпасть.
-    candidate = analyze_candles(normalized, candles, allow_weak=slope_mode_only())
-    if candidate and trend is not None:
-        if slope_levels_active():
-            # Для режима наклонок не отсекаем кандидата тренд-фильтром заранее:
-            # наклонка сама проверит совпадение с 4h-трендом.
-            candidate = attach_trend_to_candidate(candidate, trend)
-        elif TREND_FILTER_ENABLED or SUPER_DEAL_ENABLED:
-            candidate = apply_trend_filter(candidate, trend)
-        else:
-            candidate = attach_trend_to_candidate(candidate, trend)
-
-    used_probe_candidate = False
-    if candidate is None and slope_mode_only():
+    # Ручной анализ не должен зависеть от MIN_SIGNAL_PROBABILITY.
+    # Поэтому allow_weak=True: даже слабый перевес LONG/SHORT превращается
+    # в кандидата для показа анализа и построения графика.
+    candidate = analyze_candles(normalized, candles, allow_weak=True)
+    if candidate is None:
         candidate = build_manual_slope_probe_candidate(normalized, candles, trend)
-        used_probe_candidate = candidate is not None
+    if candidate and trend is not None:
+        candidate = attach_trend_to_candidate(candidate, trend)
 
+    if candidate is None:
+        return None, True, len(candles), "⚠️ Данные получены, но не удалось рассчитать ATR/RSI для ручного анализа. Попробуй позже."
+
+    if candidate.probability < MIN_SIGNAL_PROBABILITY:
+        notes.append(
+            f"ℹ️ Ручной скан не блокируется порогом автоотправки: "
+            f"проходимость {candidate.probability}% ниже настройки {MIN_SIGNAL_PROBABILITY}%."
+        )
+
+    if BTC_ETH_ONLY_MODE_ENABLED and not is_btc_eth_symbol(normalized):
+        notes.append("₿ Режим Только BTC/ETH включён для авто-скана, но ручной анализ этой монеты показан.")
+
+    if TREND_FILTER_ENABLED and trend is not None:
+        side = candidate.side.upper()
+        trend_ok = (
+            (side == "LONG" and trend.direction == "BULL")
+            or (side == "SHORT" and trend.direction == "BEAR")
+        )
+        if not trend_ok:
+            notes.append(
+                f"🧭 Тренд-фильтр не блокирует ручной анализ: {TREND_TIMEFRAME} "
+                f"{trend_direction_label(trend.direction)} / score {trend.score:+d}."
+            )
+
+    # Наклонные уровни в ручном вводе проверяются отдельно и не скрывают анализ.
     if slope_levels_active() and candidate:
-        if slope_mode_requires_threshold() and candidate.probability < MIN_SIGNAL_PROBABILITY:
-            note = f"📐 Режим наклонок: порог + наклонки. Базовая проходимость {candidate.probability}% ниже порога {MIN_SIGNAL_PROBABILITY}%, поэтому сигнал/сделка не проходят."
-            return None, True, len(candles), note
+        base_before_slope = candidate.probability
+        if slope_mode_requires_threshold() and base_before_slope < MIN_SIGNAL_PROBABILITY:
+            notes.append(
+                f"📐 Режим 'порог + наклонки': для авто-сигнала базовая проходимость "
+                f"{base_before_slope}% ниже порога {MIN_SIGNAL_PROBABILITY}%, но ручной анализ и график всё равно показаны."
+            )
         slope_candidate = apply_slope_level_filter(
             candidate,
             candles,
@@ -5172,30 +5342,26 @@ async def scan_single_symbol(symbol: str) -> tuple[Optional[SignalCandidate], bo
         if slope_candidate:
             candidate = slope_candidate
             if slope_mode_only():
-                note = "📐 Наклонка найдена: режим только наклонок, общий порог проходимости не обязателен."
+                notes.append("📐 Наклонный уровень найден: режим Только наклонки, общий порог не обязателен.")
+            elif candidate.probability >= MIN_SIGNAL_PROBABILITY:
+                notes.append("📐 Наклонный уровень найден: условия наклонки пройдены.")
             else:
-                note = "📐 Наклонка найдена: общий порог и наклонка совпали."
+                notes.append("📐 Наклонный уровень найден, но для авто-сигнала ещё учитывается общий порог.")
         else:
-            if slope_mode_only():
-                note = "📐 Наклонка проверена отдельно от порога, но подходящий уровень не найден."
-            else:
-                note = "📐 Режим порог + наклонки: базовый порог пройден, но подходящий наклонный уровень не найден."
-            if used_probe_candidate or slope_mode_requires_threshold():
-                return None, True, len(candles), note
+            notes.append("📐 Наклонный уровень по строгим условиям не найден; ниже показан ручной график наклона в процентах.")
 
-    if candidate:
-        candidate = apply_btc_eth_only_filter(candidate, candles, btc_eth_candles)
-    if candidate:
-        candidate = apply_neural_optimizer(candidate, candles)
-    if candidate:
-        candidate = apply_smart_algorithm(candidate)
-    if candidate:
-        candidate = apply_trading_improvements_filters(candidate, candles)
-    if candidate and (not slope_levels_active()):
-        candidate = apply_slope_level_filter(candidate, candles)
-    if candidate:
-        candidate = apply_super_deal_filter(candidate)
-    return candidate, True, len(candles), note
+    # Остальные строгие фильтры могут обнулить кандидата в авто-скане. В ручном
+    # вводе они не применяются как блокировка, чтобы пользователь всегда видел
+    # анализ монеты, текущую проходимость и график.
+    if NEURAL_OPTIMIZER_ENABLED:
+        notes.append("🤖 AI-фильтр не блокирует ручной анализ; для авто-сигналов он остаётся активным.")
+    if TRADING_IMPROVEMENTS_ENABLED:
+        notes.append("🚀 Фильтры улучшений торговли не блокируют ручной анализ; для авто-сигналов они остаются активными.")
+    if SUPER_DEAL_ENABLED:
+        notes.append("🔴 Супер-сделка не блокирует ручной анализ; для авто-сигналов строгий фильтр остаётся активным.")
+
+    candidate = attach_manual_slope_chart(candidate, candles)
+    return candidate, True, len(candles), "\n".join(notes)
 
 async def safe_edit(message_to_edit: Message, text: str) -> None:
     try:
@@ -5208,13 +5374,6 @@ async def answer_single_symbol_scan(message: Message, symbol_text: str) -> None:
     normalized = normalize_user_symbol(symbol_text)
     if not normalized:
         await message.answer("Не понял монету. Напиши, например: <code>BTC</code>, <code>XMR</code> или <code>BTCUSDT</code>.")
-        return
-
-    if BTC_ETH_ONLY_MODE_ENABLED and not is_btc_eth_symbol(normalized):
-        await message.answer(
-            "₿ Режим <b>Только BTC/ETH</b> включён. Сейчас бот анализирует только <b>BTCUSDT</b> и <b>ETHUSDT</b>. "
-            "Выключи режим в /settings → ₿ Только BTC/ETH, если хочешь сканировать другие монеты."
-        )
         return
 
     progress = await message.answer(f"🔎 Сканирую <b>{html.escape(display_symbol(normalized))}</b> на {html.escape(exchange_label())}...")
@@ -5262,6 +5421,7 @@ async def answer_single_symbol_scan(message: Message, symbol_text: str) -> None:
         timeframe=candidate.timeframe,
         auto=False,
         super_deal=candidate.is_super_deal,
+        manual_analysis=True,
     )
     if candidate.probability < MIN_SIGNAL_PROBABILITY:
         text += f"\n\nℹ️ Ниже порога автоотправки: {candidate.probability}% < {MIN_SIGNAL_PROBABILITY}%."
