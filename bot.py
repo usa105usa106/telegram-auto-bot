@@ -2238,6 +2238,16 @@ def macd_values(closes: list[float]) -> tuple[list[float], list[float], list[flo
     return macd_line, signal_line, histogram
 
 
+def calculate_macd(closes: list[float]) -> tuple[list[float], list[float], list[float]]:
+    """Совместимый алиас для режима наклонных уровней.
+
+    В основной логике бота MACD уже считается через macd_values().
+    В блоке наклонок используется старое имя calculate_macd(), поэтому без
+    этого алиаса при включении режима возникала ошибка NameError.
+    """
+    return macd_values(closes)
+
+
 # ---------- exchange data ----------
 
 def mexc_symbol(symbol: str) -> str:
