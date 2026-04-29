@@ -1,7 +1,9 @@
 import asyncio
 import html
+import io
 import json
 import logging
+import math
 import os
 import time
 import uuid
@@ -15,7 +17,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardMarkup
+from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardMarkup
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -161,6 +163,49 @@ SUPER_DEAL_MIN_PROBABILITY = max(97, min(99, int(os.getenv("SUPER_DEAL_MIN_PROBA
 SUPER_DEAL_RAW_PROBABILITY_MIN = max(90, min(95, int(os.getenv("SUPER_DEAL_RAW_PROBABILITY_MIN", "95"))))
 SUPER_DEAL_TREND_SCORE_ABS = max(3, min(7, int(os.getenv("SUPER_DEAL_TREND_SCORE_ABS", "7"))))
 
+# ---- Только BTC/ETH ----
+# OFF по умолчанию. Когда включено, бот сканирует только BTCUSDT и ETHUSDT
+# и применяет отдельный строгий профиль подтверждений по нескольким таймфреймам.
+BTC_ETH_ONLY_MODE_ENABLED = os.getenv("BTC_ETH_ONLY_MODE_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+BTC_ETH_ONLY_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
+BTC_ETH_ONLY_MIN_PROBABILITY = max(80, min(95, int(os.getenv("BTC_ETH_ONLY_MIN_PROBABILITY", "90"))))
+BTC_ETH_ONLY_TREND_SCORE_ABS = max(3, min(7, int(os.getenv("BTC_ETH_ONLY_TREND_SCORE_ABS", "5"))))
+BTC_ETH_ONLY_MIN_TF_CONFIRMATIONS = max(1, min(4, int(os.getenv("BTC_ETH_ONLY_MIN_TF_CONFIRMATIONS", "2"))))
+BTC_ETH_ONLY_MIN_CONFIRMATION_SCORE = max(4, min(8, int(os.getenv("BTC_ETH_ONLY_MIN_CONFIRMATION_SCORE", "5"))))
+BTC_ETH_ONLY_MIN_VOLUME_RATIO = max(0.5, min(5.0, float(os.getenv("BTC_ETH_ONLY_MIN_VOLUME_RATIO", "1.05"))))
+BTC_ETH_ONLY_MIN_ATR_PCT = max(0.0, float(os.getenv("BTC_ETH_ONLY_MIN_ATR_PCT", "0.05")))
+BTC_ETH_ONLY_MAX_ATR_PCT = max(BTC_ETH_ONLY_MIN_ATR_PCT + 0.01, float(os.getenv("BTC_ETH_ONLY_MAX_ATR_PCT", "4.0")))
+BTC_ETH_ONLY_MAX_ENTRY_ATR_DISTANCE = max(0.2, min(5.0, float(os.getenv("BTC_ETH_ONLY_MAX_ENTRY_ATR_DISTANCE", "1.6"))))
+_ALLOWED_BTC_ETH_CONFIRMATION_TIMEFRAMES = {"15m", "30m", "1h", "4h", "8h", "1d"}
+_ENV_BTC_ETH_CONFIRMATION_TIMEFRAMES = [
+    item.strip()
+    for item in os.getenv("BTC_ETH_CONFIRMATION_TIMEFRAMES", "1h,4h").split(",")
+    if item.strip()
+]
+BTC_ETH_CONFIRMATION_TIMEFRAMES = [
+    tf for tf in _ENV_BTC_ETH_CONFIRMATION_TIMEFRAMES
+    if tf in _ALLOWED_BTC_ETH_CONFIRMATION_TIMEFRAMES
+] or ["1h", "4h"]
+
+# ---- Наклонные уровни ----
+# OFF по умолчанию. Когда включено, бот пропускает сигнал/автосделку только если
+# найден качественный наклонный уровень: восходящая поддержка для LONG или
+# нисходящее сопротивление для SHORT, рядом с текущей ценой и по направлению тренда.
+SLOPE_LEVELS_ENABLED = os.getenv("SLOPE_LEVELS_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+SLOPE_LEVEL_MIN_BASE_PROBABILITY = max(60, min(95, int(os.getenv("SLOPE_LEVEL_MIN_BASE_PROBABILITY", "75"))))
+SLOPE_LEVEL_MIN_LEVEL_PROBABILITY = max(70, min(99, int(os.getenv("SLOPE_LEVEL_MIN_LEVEL_PROBABILITY", "85"))))
+SLOPE_LEVEL_PRIORITY_PROBABILITY = max(SLOPE_LEVEL_MIN_LEVEL_PROBABILITY, min(99, int(os.getenv("SLOPE_LEVEL_PRIORITY_PROBABILITY", "98"))))
+SLOPE_LEVEL_LOOKBACK_CANDLES = max(40, min(240, int(os.getenv("SLOPE_LEVEL_LOOKBACK_CANDLES", "120"))))
+SLOPE_LEVEL_CHART_CANDLES = max(30, min(160, int(os.getenv("SLOPE_LEVEL_CHART_CANDLES", "90"))))
+SLOPE_LEVEL_PIVOT_WINDOW = max(2, min(8, int(os.getenv("SLOPE_LEVEL_PIVOT_WINDOW", "3"))))
+SLOPE_LEVEL_MIN_TOUCHES = max(2, min(8, int(os.getenv("SLOPE_LEVEL_MIN_TOUCHES", "3"))))
+SLOPE_LEVEL_TOUCH_ATR_TOLERANCE = max(0.10, min(2.0, float(os.getenv("SLOPE_LEVEL_TOUCH_ATR_TOLERANCE", "0.45"))))
+SLOPE_LEVEL_MAX_ENTRY_ATR_DISTANCE = max(0.10, min(3.0, float(os.getenv("SLOPE_LEVEL_MAX_ENTRY_ATR_DISTANCE", "0.85"))))
+SLOPE_LEVEL_MIN_SLOPE_PCT_PER_CANDLE = max(0.0, min(0.2, float(os.getenv("SLOPE_LEVEL_MIN_SLOPE_PCT_PER_CANDLE", "0.003"))))
+SLOPE_LEVEL_TREND_SCORE_ABS = max(2, min(7, int(os.getenv("SLOPE_LEVEL_TREND_SCORE_ABS", "4"))))
+SLOPE_LEVEL_PROBABILITY_BONUS = max(0, min(20, int(os.getenv("SLOPE_LEVEL_PROBABILITY_BONUS", "8"))))
+SLOPE_LEVEL_SEND_CHARTS = os.getenv("SLOPE_LEVEL_SEND_CHARTS", "true").strip().lower() in {"1", "true", "yes", "on"}
+
 # ---- Улучшения торговли ----
 # Master-переключатель. OFF = бот работает как раньше. ON = включаются дополнительные
 # защитные фильтры, риск-движок, частичные тейки, breakeven, лимиты убытков, panic и расширенная статистика.
@@ -249,6 +294,8 @@ def save_runtime_settings() -> None:
         "SMART_ALGORITHM_ENABLED": SMART_ALGORITHM_ENABLED,
         "NEURAL_OPTIMIZER_ENABLED": NEURAL_OPTIMIZER_ENABLED,
         "SUPER_DEAL_ENABLED": SUPER_DEAL_ENABLED,
+        "BTC_ETH_ONLY_MODE_ENABLED": BTC_ETH_ONLY_MODE_ENABLED,
+        "SLOPE_LEVELS_ENABLED": SLOPE_LEVELS_ENABLED,
         "TRADING_IMPROVEMENTS_ENABLED": TRADING_IMPROVEMENTS_ENABLED,
     })
 
@@ -256,7 +303,7 @@ def save_runtime_settings() -> None:
 def apply_runtime_settings(settings: dict[str, Any]) -> None:
     global MIN_SIGNAL_PROBABILITY, SIGNAL_TIMEFRAME, SCAN_INTERVAL_SECONDS, MARKET_DATA_PROVIDER
     global AUTO_TRADE_MODE, TRADE_MARGIN_USDT, AUTO_CLOSE_TP_INDEX, SMART_ALGORITHM_ENABLED
-    global NEURAL_OPTIMIZER_ENABLED, SUPER_DEAL_ENABLED, TRADING_IMPROVEMENTS_ENABLED
+    global NEURAL_OPTIMIZER_ENABLED, SUPER_DEAL_ENABLED, BTC_ETH_ONLY_MODE_ENABLED, SLOPE_LEVELS_ENABLED, TRADING_IMPROVEMENTS_ENABLED
     global TREND_FILTER_ENABLED, TREND_TIMEFRAME
     try:
         probability = int(settings.get("MIN_SIGNAL_PROBABILITY", MIN_SIGNAL_PROBABILITY))
@@ -322,6 +369,18 @@ def apply_runtime_settings(settings: dict[str, Any]) -> None:
     else:
         SUPER_DEAL_ENABLED = str(super_raw).strip().lower() in {"1", "true", "yes", "on"}
 
+    btc_eth_raw = settings.get("BTC_ETH_ONLY_MODE_ENABLED", BTC_ETH_ONLY_MODE_ENABLED)
+    if isinstance(btc_eth_raw, bool):
+        BTC_ETH_ONLY_MODE_ENABLED = btc_eth_raw
+    else:
+        BTC_ETH_ONLY_MODE_ENABLED = str(btc_eth_raw).strip().lower() in {"1", "true", "yes", "on"}
+
+    slope_raw = settings.get("SLOPE_LEVELS_ENABLED", SLOPE_LEVELS_ENABLED)
+    if isinstance(slope_raw, bool):
+        SLOPE_LEVELS_ENABLED = slope_raw
+    else:
+        SLOPE_LEVELS_ENABLED = str(slope_raw).strip().lower() in {"1", "true", "yes", "on"}
+
     improvements_raw = settings.get("TRADING_IMPROVEMENTS_ENABLED", TRADING_IMPROVEMENTS_ENABLED)
     if isinstance(improvements_raw, bool):
         TRADING_IMPROVEMENTS_ENABLED = improvements_raw
@@ -347,6 +406,8 @@ def exchange_label(exchange: Optional[str] = None) -> str:
 
 
 def symbols_mode_text() -> str:
+    if BTC_ETH_ONLY_MODE_ENABLED:
+        return "только BTC/ETH: строгий профиль подтверждений"
     if MARKET_DATA_PROVIDER == "mexc" and MEXC_DYNAMIC_TOP_SYMBOLS and not USE_ENV_SYMBOLS:
         return f"топ {MEXC_SYMBOLS_LIMIT} MEXC Futures по 24h обороту"
     if MARKET_DATA_PROVIDER == "bingx" and BINGX_DYNAMIC_TOP_SYMBOLS and not USE_ENV_SYMBOLS:
@@ -390,6 +451,25 @@ def super_deal_label() -> str:
     return "OFF — обычные сигналы по текущим фильтрам"
 
 
+def btc_eth_only_label() -> str:
+    if BTC_ETH_ONLY_MODE_ENABLED:
+        tfs = ", ".join(BTC_ETH_CONFIRMATION_TIMEFRAMES)
+        return (
+            f"ON — только BTC/ETH, порог {BTC_ETH_ONLY_MIN_PROBABILITY}%, "
+            f"подтверждения {tfs}"
+        )
+    return "OFF — сканируются монеты из общего списка"
+
+
+def slope_levels_label() -> str:
+    if SLOPE_LEVELS_ENABLED:
+        return (
+            f"ON — наклонки, уровень ≥{SLOPE_LEVEL_MIN_LEVEL_PROBABILITY}%, "
+            f"touches ≥{SLOPE_LEVEL_MIN_TOUCHES}, dist ≤{SLOPE_LEVEL_MAX_ENTRY_ATR_DISTANCE:g} ATR"
+        )
+    return "OFF — без фильтра наклонных уровней"
+
+
 def trading_improvements_label() -> str:
     if TRADING_IMPROVEMENTS_ENABLED:
         return (
@@ -412,6 +492,8 @@ def settings_menu_text() -> str:
         f"История smart: <b>{html.escape(smart_learning_stats_text())}</b>\n"
         f"Фильтр тренда: <b>{html.escape(trend_filter_label())}</b>\n"
         f"Супер сделка: <b>{html.escape(super_deal_label())}</b>\n"
+        f"Только BTC/ETH: <b>{html.escape(btc_eth_only_label())}</b>\n"
+        f"Наклонки: <b>{html.escape(slope_levels_label())}</b>\n"
         f"Улучшения торговли: <b>{html.escape(trading_improvements_label())}</b>\n"
         f"Автоторговля: <b>{html.escape(autotrade_label())}</b>\n"
         f"Маржа/объём сделки: <b>${TRADE_MARGIN_USDT:g}</b>\n"
@@ -432,6 +514,8 @@ def settings_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🤖 Нейросети", callback_data="settings:neural")],
         [InlineKeyboardButton(text="🧭 Фильтр тренда", callback_data="settings:trend")],
         [InlineKeyboardButton(text="🔴 Супер сделка", callback_data="settings:super_deal")],
+        [InlineKeyboardButton(text="₿ Только BTC/ETH", callback_data="settings:btc_eth_only")],
+        [InlineKeyboardButton(text="📐 Наклонки", callback_data="settings:slope_levels")],
         [InlineKeyboardButton(text="🚀 Улучшения торговли", callback_data="settings:improvements")],
         [InlineKeyboardButton(text="💰 Автоторговля", callback_data="settings:autotrade")],
         [InlineKeyboardButton(text="🔑 API ключи", callback_data="settings:api")],
@@ -579,6 +663,38 @@ def super_deal_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def btc_eth_only_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text=("✅ " if not BTC_ETH_ONLY_MODE_ENABLED else "") + "OFF",
+                callback_data="settings:set_btc_eth_only:off",
+            ),
+            InlineKeyboardButton(
+                text=("✅ " if BTC_ETH_ONLY_MODE_ENABLED else "") + "ON",
+                callback_data="settings:set_btc_eth_only:on",
+            ),
+        ],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:menu")],
+    ])
+
+
+def slope_levels_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text=("✅ " if not SLOPE_LEVELS_ENABLED else "") + "OFF",
+                callback_data="settings:set_slope_levels:off",
+            ),
+            InlineKeyboardButton(
+                text=("✅ " if SLOPE_LEVELS_ENABLED else "") + "ON",
+                callback_data="settings:set_slope_levels:on",
+            ),
+        ],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:menu")],
+    ])
+
+
 def trading_improvements_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -662,8 +778,10 @@ keyboard = ReplyKeyboardMarkup(
         [KeyboardButton(text="🆔 Мой ID"), KeyboardButton(text="❓ Помощь")],
         [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="🧠 Умный алгоритм")],
         [KeyboardButton(text="🤖 Нейросети"), KeyboardButton(text="🧭 Фильтр тренда")],
-        [KeyboardButton(text="🔴 Супер сделка"), KeyboardButton(text="🚀 Улучшения торговли")],
-        [KeyboardButton(text="💰 Автоторговля"), KeyboardButton(text="🔑 API")],
+        [KeyboardButton(text="🔴 Супер сделка"), KeyboardButton(text="₿ Только BTC/ETH")],
+        [KeyboardButton(text="📐 Наклонки"), KeyboardButton(text="🚀 Улучшения торговли")],
+        [KeyboardButton(text="💰 Автоторговля")],
+        [KeyboardButton(text="🔑 API")],
         [KeyboardButton(text="🔕 Отписаться")],
     ],
     resize_keyboard=True,
@@ -681,6 +799,23 @@ class TrendInfo:
 
 
 @dataclass
+class SlopeLevelInfo:
+    kind: str
+    direction: str
+    probability: int
+    touches: int
+    distance_atr: float
+    distance_pct: float
+    slope: float
+    intercept: float
+    r2: float
+    line_now: float
+    trend_score: int
+    timeframe: str
+    reasons: list[str]
+
+
+@dataclass
 class SignalCandidate:
     symbol: str
     side: str
@@ -694,6 +829,8 @@ class SignalCandidate:
     ai_optimizer: Optional[dict[str, Any]] = None
     is_super_deal: bool = False
     super_deal_score: int = 0
+    slope_level: Optional[SlopeLevelInfo] = None
+    slope_chart_png: Optional[bytes] = None
 
 
 @dataclass
@@ -727,6 +864,10 @@ class ScanResult:
     neural_blocked: int = 0
     super_deal_passed: int = 0
     super_deal_blocked: int = 0
+    btc_eth_passed: int = 0
+    btc_eth_blocked: int = 0
+    slope_passed: int = 0
+    slope_blocked: int = 0
     improvements_passed: int = 0
     improvements_blocked: int = 0
     data_provider: str = MARKET_DATA_PROVIDER
@@ -1402,6 +1543,8 @@ def apply_neural_optimizer(candidate: Optional[SignalCandidate], candles: list[d
         ai_optimizer=neural_result_to_dict(result),
         is_super_deal=candidate.is_super_deal,
         super_deal_score=candidate.super_deal_score,
+        slope_level=candidate.slope_level,
+        slope_chart_png=candidate.slope_chart_png,
     )
 
 
@@ -1409,7 +1552,7 @@ def clone_candidate(candidate: SignalCandidate, probability: int, reasons: Optio
     return SignalCandidate(
         symbol=candidate.symbol,
         side=candidate.side,
-        probability=max(1, min(95, int(probability))),
+        probability=max(1, min(99, int(probability))),
         entry=candidate.entry,
         stop=candidate.stop,
         take_profits=list(candidate.take_profits),
@@ -1419,6 +1562,8 @@ def clone_candidate(candidate: SignalCandidate, probability: int, reasons: Optio
         ai_optimizer=candidate.ai_optimizer,
         is_super_deal=candidate.is_super_deal,
         super_deal_score=candidate.super_deal_score,
+        slope_level=candidate.slope_level,
+        slope_chart_png=candidate.slope_chart_png,
     )
 
 
@@ -1970,6 +2115,8 @@ def scan_summary_text(scan: ScanResult, title: str = "🧪 Отчёт авто-�
         f"Smart-история: <b>{html.escape(smart_learning_stats_text())}</b>",
         f"Фильтр тренда: <b>{html.escape(trend_filter_label())}</b>",
         f"Супер сделка: <b>{html.escape(super_deal_label())}</b>",
+        f"Только BTC/ETH: <b>{html.escape(btc_eth_only_label())}</b>",
+        f"Наклонки: <b>{html.escape(slope_levels_label())}</b>",
         f"Улучшения торговли: <b>{html.escape(trading_improvements_label())}</b>",
         f"Данные получены: <b>{scan.successful_symbols}</b> / {scan.total_symbols or len(SYMBOLS)}",
         f"Ошибки/нет пары: <b>{scan.failed_symbols}</b>",
@@ -1988,6 +2135,16 @@ def scan_summary_text(scan: ScanResult, title: str = "🧪 Отчёт авто-�
         lines.append(
             f"Супер-сделки: найдено <b>{scan.super_deal_passed}</b>, "
             f"отсечено <b>{scan.super_deal_blocked}</b>"
+        )
+    if BTC_ETH_ONLY_MODE_ENABLED:
+        lines.append(
+            f"BTC/ETH-фильтр: пропущено <b>{scan.btc_eth_passed}</b>, "
+            f"отсечено <b>{scan.btc_eth_blocked}</b>"
+        )
+    if SLOPE_LEVELS_ENABLED:
+        lines.append(
+            f"Наклонки: пропущено <b>{scan.slope_passed}</b>, "
+            f"отсечено <b>{scan.slope_blocked}</b>"
         )
     if TRADING_IMPROVEMENTS_ENABLED:
         lines.append(
@@ -2098,6 +2255,10 @@ def compact_symbol(symbol: str) -> str:
     return symbol.upper().replace("_", "").replace("-", "")
 
 
+def is_btc_eth_symbol(symbol: str) -> bool:
+    return compact_symbol(symbol) in set(BTC_ETH_ONLY_SYMBOLS)
+
+
 def display_symbol(symbol: str) -> str:
     if MARKET_DATA_PROVIDER == "mexc":
         return mexc_symbol(symbol)
@@ -2173,6 +2334,9 @@ async def fetch_mexc_top_symbols(session: aiohttp.ClientSession, limit: int) -> 
 
 
 async def get_symbols_for_scan(session: aiohttp.ClientSession) -> list[str]:
+    if BTC_ETH_ONLY_MODE_ENABLED:
+        return list(BTC_ETH_ONLY_SYMBOLS)
+
     if MARKET_DATA_PROVIDER == "mexc":
         if MEXC_DYNAMIC_TOP_SYMBOLS and not USE_ENV_SYMBOLS:
             symbols = await fetch_mexc_top_symbols(session, MEXC_SYMBOLS_LIMIT)
@@ -2709,6 +2873,8 @@ def apply_trend_filter(candidate: Optional[SignalCandidate], trend: Optional[Tre
         ai_optimizer=candidate.ai_optimizer,
         is_super_deal=candidate.is_super_deal,
         super_deal_score=candidate.super_deal_score,
+        slope_level=candidate.slope_level,
+        slope_chart_png=candidate.slope_chart_png,
     )
 
 
@@ -2856,6 +3022,500 @@ def analyze_candles(symbol: str, candles: list[dict[str, float]]) -> Optional[Si
     return SignalCandidate(symbol=symbol, side=side, probability=probability, entry=entry, stop=stop, take_profits=tps, reasons=reasons[:5], timeframe=SIGNAL_TIMEFRAME)
 
 
+def attach_trend_to_candidate(candidate: SignalCandidate, trend: Optional[TrendInfo]) -> SignalCandidate:
+    return SignalCandidate(
+        symbol=candidate.symbol,
+        side=candidate.side,
+        probability=candidate.probability,
+        entry=candidate.entry,
+        stop=candidate.stop,
+        take_profits=list(candidate.take_profits),
+        reasons=list(candidate.reasons),
+        timeframe=candidate.timeframe,
+        trend=trend,
+        ai_optimizer=candidate.ai_optimizer,
+        is_super_deal=candidate.is_super_deal,
+        super_deal_score=candidate.super_deal_score,
+        slope_level=candidate.slope_level,
+        slope_chart_png=candidate.slope_chart_png,
+    )
+
+
+def btc_eth_unique_timeframes() -> list[str]:
+    result: list[str] = []
+    for tf in [SIGNAL_TIMEFRAME, TREND_TIMEFRAME, *BTC_ETH_CONFIRMATION_TIMEFRAMES]:
+        if tf and tf not in result:
+            result.append(tf)
+    return result
+
+
+def btc_eth_timeframe_confirmation(
+    side: str,
+    candles: Optional[list[dict[str, float]]],
+    timeframe: str,
+) -> tuple[bool, int, str]:
+    if not candles or len(candles) < 80:
+        return False, 0, f"{timeframe}: мало свечей"
+
+    closes = [float(c["close"]) for c in candles]
+    highs = [float(c["high"]) for c in candles]
+    lows = [float(c["low"]) for c in candles]
+    volumes = [float(c.get("volume") or 0) for c in candles]
+    close = closes[-1]
+    if close <= 0:
+        return False, 0, f"{timeframe}: некорректная цена"
+
+    ema21_values = ema(closes, 21)
+    ema50_values = ema(closes, 50)
+    ema100_values = ema(closes, 100) if len(closes) >= 100 else []
+    rsis = calculate_rsi(closes, 14)
+    atrs = calculate_atr(highs, lows, closes, 14)
+    _, _, hist = macd_values(closes)
+
+    rsi_now = rsis[-1]
+    rsi_prev = rsis[-2] if len(rsis) >= 2 else None
+    atr_now = atrs[-1] if atrs else None
+    if rsi_now is None or rsi_prev is None or not atr_now or atr_now <= 0:
+        return False, 0, f"{timeframe}: индикаторы ещё не готовы"
+
+    atr_pct = atr_now / close * 100.0
+    if atr_pct < BTC_ETH_ONLY_MIN_ATR_PCT:
+        return False, 0, f"{timeframe}: ATR {atr_pct:.2f}% слишком низкий"
+    if atr_pct > BTC_ETH_ONLY_MAX_ATR_PCT:
+        return False, 0, f"{timeframe}: ATR {atr_pct:.2f}% слишком высокий"
+
+    avg_volume = sum(volumes[-21:-1]) / 20 if len(volumes) >= 21 else max(volumes[-1], 1.0)
+    volume_ratio = volumes[-1] / avg_volume if avg_volume > 0 else 1.0
+    ema21_now = ema21_values[-1]
+    ema50_now = ema50_values[-1]
+    ema50_prev = ema50_values[-6] if len(ema50_values) >= 6 else ema50_values[0]
+    distance_atr = abs(close - ema21_now) / atr_now if atr_now else 99.0
+
+    if distance_atr > BTC_ETH_ONLY_MAX_ENTRY_ATR_DISTANCE:
+        return False, 0, f"{timeframe}: цена далеко от EMA21 ({distance_atr:.2f} ATR), вход запоздалый"
+
+    score = 0
+    reasons: list[str] = []
+    side_clean = side.upper()
+
+    if side_clean == "LONG":
+        if close > ema21_now > ema50_now:
+            score += 2
+            reasons.append("EMA21/50 вверх")
+        if ema50_now > ema50_prev:
+            score += 1
+            reasons.append("EMA50 растёт")
+        if ema100_values and close > ema100_values[-1] and ema50_now > ema100_values[-1]:
+            score += 1
+            reasons.append("выше EMA100")
+        if 50 <= rsi_now <= 70 and rsi_now >= rsi_prev:
+            score += 1
+            reasons.append(f"RSI {rsi_now:.1f} подтверждает LONG")
+        if len(hist) >= 3 and hist[-1] > 0 and hist[-1] >= hist[-2]:
+            score += 1
+            reasons.append("MACD растёт")
+        if volume_ratio >= BTC_ETH_ONLY_MIN_VOLUME_RATIO:
+            score += 1
+            reasons.append(f"объём x{volume_ratio:.2f}")
+        if len(highs) >= 21 and close >= max(highs[-21:-1]) * 0.997:
+            score += 1
+            reasons.append("цена у 20-high")
+    elif side_clean == "SHORT":
+        if close < ema21_now < ema50_now:
+            score += 2
+            reasons.append("EMA21/50 вниз")
+        if ema50_now < ema50_prev:
+            score += 1
+            reasons.append("EMA50 падает")
+        if ema100_values and close < ema100_values[-1] and ema50_now < ema100_values[-1]:
+            score += 1
+            reasons.append("ниже EMA100")
+        if 30 <= rsi_now <= 50 and rsi_now <= rsi_prev:
+            score += 1
+            reasons.append(f"RSI {rsi_now:.1f} подтверждает SHORT")
+        if len(hist) >= 3 and hist[-1] < 0 and hist[-1] <= hist[-2]:
+            score += 1
+            reasons.append("MACD падает")
+        if volume_ratio >= BTC_ETH_ONLY_MIN_VOLUME_RATIO:
+            score += 1
+            reasons.append(f"объём x{volume_ratio:.2f}")
+        if len(lows) >= 21 and close <= min(lows[-21:-1]) * 1.003:
+            score += 1
+            reasons.append("цена у 20-low")
+    else:
+        return False, 0, f"{timeframe}: неизвестная сторона"
+
+    passed = score >= BTC_ETH_ONLY_MIN_CONFIRMATION_SCORE
+    status = "OK" if passed else "слабо"
+    detail = "; ".join(reasons[:4]) if reasons else "нет сильных подтверждений"
+    return passed, score, f"{timeframe}: {status}, score {score}/8 — {detail}"
+
+
+def apply_btc_eth_only_filter(
+    candidate: Optional[SignalCandidate],
+    signal_candles: list[dict[str, float]],
+    confirmation_candles: Optional[dict[str, Optional[list[dict[str, float]]]]] = None,
+) -> Optional[SignalCandidate]:
+    if candidate is None or not BTC_ETH_ONLY_MODE_ENABLED:
+        return candidate
+
+    if not is_btc_eth_symbol(candidate.symbol):
+        return None
+    if candidate.probability < BTC_ETH_ONLY_MIN_PROBABILITY:
+        return None
+
+    side = candidate.side.upper()
+    trend = candidate.trend
+    if trend is None or trend.direction in {"UNKNOWN", "FLAT"}:
+        return None
+    trend_direction = trend.direction.upper()
+    trend_allowed = (side == "LONG" and trend_direction == "BULL") or (side == "SHORT" and trend_direction == "BEAR")
+    if not trend_allowed or abs(trend.score) < BTC_ETH_ONLY_TREND_SCORE_ABS:
+        return None
+
+    candles_by_tf: dict[str, Optional[list[dict[str, float]]]] = dict(confirmation_candles or {})
+    candles_by_tf.setdefault(SIGNAL_TIMEFRAME, signal_candles)
+
+    confirmations = 0
+    checked = 0
+    details: list[str] = []
+    for tf in btc_eth_unique_timeframes():
+        tf_candles = candles_by_tf.get(tf)
+        passed, score, detail = btc_eth_timeframe_confirmation(side, tf_candles, tf)
+        checked += 1
+        details.append(detail)
+        if passed:
+            confirmations += 1
+
+    required = min(BTC_ETH_ONLY_MIN_TF_CONFIRMATIONS, max(1, checked))
+    if confirmations < required:
+        return None
+
+    new_probability = min(95, max(candidate.probability, BTC_ETH_ONLY_MIN_PROBABILITY) + min(3, confirmations))
+    reason = (
+        f"₿ BTC/ETH strict: {confirmations}/{checked} ТФ подтверждены, "
+        f"trend score {trend.score:+d}, порог {BTC_ETH_ONLY_MIN_PROBABILITY}%"
+    )
+    reasons = (candidate.reasons + [reason] + details[:3])[:10]
+    return clone_candidate(candidate, new_probability, reasons)
+
+
+
+# ---------- slope levels ----------
+
+def slope_level_to_dict(level: Optional[SlopeLevelInfo]) -> Optional[dict[str, Any]]:
+    if level is None:
+        return None
+    return {
+        "kind": level.kind,
+        "direction": level.direction,
+        "probability": level.probability,
+        "touches": level.touches,
+        "distance_atr": level.distance_atr,
+        "distance_pct": level.distance_pct,
+        "slope": level.slope,
+        "intercept": level.intercept,
+        "r2": level.r2,
+        "line_now": level.line_now,
+        "trend_score": level.trend_score,
+        "timeframe": level.timeframe,
+        "reasons": list(level.reasons),
+    }
+
+
+def trend_matches_side(candidate: SignalCandidate, min_abs_score: int = 1) -> bool:
+    trend = candidate.trend
+    if trend is None or trend.direction in {"UNKNOWN", "FLAT"}:
+        return False
+    side = candidate.side.upper()
+    direction = trend.direction.upper()
+    if side == "LONG":
+        return direction == "BULL" and trend.score >= min_abs_score
+    if side == "SHORT":
+        return direction == "BEAR" and trend.score <= -min_abs_score
+    return False
+
+
+def find_swing_pivots(candles: list[dict[str, float]], side: str, window: int) -> list[tuple[int, float]]:
+    if len(candles) < window * 2 + 5:
+        return []
+    side = side.upper()
+    values = [float(c["low"] if side == "LONG" else c["high"]) for c in candles]
+    pivots: list[tuple[int, float]] = []
+    for i in range(window, len(values) - window):
+        local = values[i - window:i + window + 1]
+        value = values[i]
+        if side == "LONG":
+            if value <= min(local) and local.count(value) == 1:
+                pivots.append((i, value))
+        else:
+            if value >= max(local) and local.count(value) == 1:
+                pivots.append((i, value))
+    return pivots[-24:]
+
+
+def r2_for_points(points: list[tuple[int, float]], slope: float, intercept: float) -> float:
+    if len(points) < 2:
+        return 0.0
+    ys = [p for _, p in points]
+    mean_y = sum(ys) / len(ys)
+    ss_tot = sum((y - mean_y) ** 2 for y in ys)
+    ss_res = sum((y - (slope * x + intercept)) ** 2 for x, y in points)
+    if ss_tot <= 1e-12:
+        return 1.0 if ss_res <= 1e-12 else 0.0
+    return max(0.0, min(1.0, 1.0 - ss_res / ss_tot))
+
+
+def detect_slope_level(candidate: SignalCandidate, candles: list[dict[str, float]]) -> Optional[SlopeLevelInfo]:
+    if not candles or len(candles) < max(50, SLOPE_LEVEL_LOOKBACK_CANDLES // 2):
+        return None
+    if candidate.probability < SLOPE_LEVEL_MIN_BASE_PROBABILITY:
+        return None
+    if not trend_matches_side(candidate, SLOPE_LEVEL_TREND_SCORE_ABS):
+        return None
+
+    side = candidate.side.upper()
+    recent = candles[-SLOPE_LEVEL_LOOKBACK_CANDLES:]
+    if len(recent) < 40:
+        return None
+
+    closes = [float(c["close"]) for c in recent]
+    highs = [float(c["high"]) for c in recent]
+    lows = [float(c["low"]) for c in recent]
+    opens = [float(c["open"]) for c in recent]
+    volumes = [float(c.get("volume") or 0) for c in recent]
+    atrs = calculate_atr(highs, lows, closes, 14)
+    atr_now = float(atrs[-1] or 0) if atrs else 0.0
+    close = closes[-1]
+    if close <= 0 or atr_now <= 0:
+        return None
+
+    pivots = find_swing_pivots(recent, side, SLOPE_LEVEL_PIVOT_WINDOW)
+    if len(pivots) < SLOPE_LEVEL_MIN_TOUCHES:
+        return None
+
+    min_dx = max(8, SLOPE_LEVEL_PIVOT_WINDOW * 3)
+    best: Optional[SlopeLevelInfo] = None
+    best_score = -1.0
+    last_index = len(recent) - 1
+    avg_volume = sum(volumes[-21:-1]) / max(1, len(volumes[-21:-1])) if len(volumes) >= 21 else sum(volumes) / max(1, len(volumes))
+    volume_ratio = volumes[-1] / avg_volume if avg_volume > 0 else 1.0
+    rsis = calculate_rsi(closes, 14)
+    rsi_now = rsis[-1]
+    _, _, hist = calculate_macd(closes)
+    ema21 = ema(closes, 21)
+    ema50 = ema(closes, 50)
+
+    for a in range(len(pivots) - 1):
+        x1, y1 = pivots[a]
+        for b in range(a + 1, len(pivots)):
+            x2, y2 = pivots[b]
+            if x2 - x1 < min_dx:
+                continue
+            slope = (y2 - y1) / (x2 - x1)
+            slope_pct = abs(slope) / close * 100.0
+            if slope_pct < SLOPE_LEVEL_MIN_SLOPE_PCT_PER_CANDLE:
+                continue
+            if side == "LONG" and slope <= 0:
+                continue
+            if side == "SHORT" and slope >= 0:
+                continue
+            intercept = y1 - slope * x1
+            line_now = slope * last_index + intercept
+            if line_now <= 0:
+                continue
+
+            # Текущая цена должна быть рядом с уровнем и с правильной стороны линии.
+            raw_distance = close - line_now if side == "LONG" else line_now - close
+            if raw_distance < -0.15 * atr_now:
+                continue
+            distance_atr = abs(raw_distance) / atr_now
+            if distance_atr > SLOPE_LEVEL_MAX_ENTRY_ATR_DISTANCE:
+                continue
+            distance_pct = abs(raw_distance) / close * 100.0
+
+            touch_points: list[tuple[int, float]] = []
+            violations = 0
+            for idx, price in pivots:
+                if idx < x1:
+                    continue
+                line = slope * idx + intercept
+                diff_atr = abs(price - line) / atr_now
+                if diff_atr <= SLOPE_LEVEL_TOUCH_ATR_TOLERANCE:
+                    touch_points.append((idx, price))
+                if side == "LONG" and price < line - SLOPE_LEVEL_TOUCH_ATR_TOLERANCE * 1.3 * atr_now:
+                    violations += 1
+                if side == "SHORT" and price > line + SLOPE_LEVEL_TOUCH_ATR_TOLERANCE * 1.3 * atr_now:
+                    violations += 1
+            if len(touch_points) < SLOPE_LEVEL_MIN_TOUCHES or violations > 1:
+                continue
+
+            r2 = r2_for_points(touch_points, slope, intercept)
+            trend_score = candidate.trend.score if candidate.trend else 0
+            bounce_ok = closes[-1] > opens[-1] and side == "LONG" or closes[-1] < opens[-1] and side == "SHORT"
+            momentum_ok = False
+            if len(hist) >= 3:
+                momentum_ok = hist[-1] > hist[-2] if side == "LONG" else hist[-1] < hist[-2]
+            ema_ok = False
+            if ema21 and ema50:
+                ema_ok = closes[-1] >= ema21[-1] >= ema50[-1] if side == "LONG" else closes[-1] <= ema21[-1] <= ema50[-1]
+            rsi_ok = False
+            if rsi_now is not None:
+                rsi_ok = 42 <= rsi_now <= 68 if side == "LONG" else 32 <= rsi_now <= 58
+
+            score = 0.0
+            score += min(30.0, len(touch_points) * 7.0)
+            score += max(0.0, 18.0 * (1.0 - distance_atr / max(SLOPE_LEVEL_MAX_ENTRY_ATR_DISTANCE, 1e-9)))
+            score += min(14.0, r2 * 14.0)
+            score += min(12.0, abs(trend_score) * 1.7)
+            if volume_ratio >= 1.05:
+                score += min(8.0, 4.0 + (volume_ratio - 1.0) * 4.0)
+            if bounce_ok:
+                score += 7.0
+            if momentum_ok:
+                score += 5.0
+            if ema_ok:
+                score += 5.0
+            if rsi_ok:
+                score += 4.0
+
+            probability = min(99, int(round(68 + score)))
+            if probability < SLOPE_LEVEL_MIN_LEVEL_PROBABILITY:
+                continue
+            kind = "восходящая поддержка" if side == "LONG" else "нисходящее сопротивление"
+            direction = "отскок вверх / LONG" if side == "LONG" else "отбой вниз / SHORT"
+            reasons = [
+                f"{kind}: {len(touch_points)} касания, точность R² {r2:.2f}",
+                f"цена от линии: {distance_atr:.2f} ATR ({distance_pct:.2f}%)",
+                f"тренд совпадает: score {trend_score:+d}",
+            ]
+            if volume_ratio >= 1.05:
+                reasons.append(f"объём подтверждает: x{volume_ratio:.2f}")
+            if bounce_ok:
+                reasons.append("последняя свеча подтверждает отработку")
+            if momentum_ok:
+                reasons.append("MACD momentum совпадает")
+            level = SlopeLevelInfo(
+                kind=kind,
+                direction=direction,
+                probability=probability,
+                touches=len(touch_points),
+                distance_atr=distance_atr,
+                distance_pct=distance_pct,
+                slope=slope,
+                intercept=intercept,
+                r2=r2,
+                line_now=line_now,
+                trend_score=trend_score,
+                timeframe=candidate.timeframe,
+                reasons=reasons,
+            )
+            if probability + score / 100.0 > best_score:
+                best_score = probability + score / 100.0
+                best = level
+    return best
+
+
+def render_slope_level_chart(candidate: SignalCandidate, candles: list[dict[str, float]], level: SlopeLevelInfo) -> Optional[bytes]:
+    if not SLOPE_LEVEL_SEND_CHARTS:
+        return None
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception:
+        logging.exception("matplotlib недоступен, график наклонного уровня не создан")
+        return None
+
+    try:
+        recent = candles[-SLOPE_LEVEL_LOOKBACK_CANDLES:]
+        chart_candles = recent[-SLOPE_LEVEL_CHART_CANDLES:]
+        offset = len(recent) - len(chart_candles)
+        xs = list(range(offset, offset + len(chart_candles)))
+        closes = [float(c["close"]) for c in chart_candles]
+        fig, ax = plt.subplots(figsize=(10, 5.6), dpi=130)
+        for x, candle in zip(xs, chart_candles):
+            o = float(candle["open"])
+            h = float(candle["high"])
+            l = float(candle["low"])
+            c = float(candle["close"])
+            color = "#149b68" if c >= o else "#d64b4b"
+            ax.vlines(x, l, h, color=color, linewidth=1.0, alpha=0.85)
+            ax.vlines(x, min(o, c), max(o, c), color=color, linewidth=3.0, alpha=0.95)
+        line_y = [level.slope * x + level.intercept for x in xs]
+        ax.plot(xs, line_y, color="#2f6bff", linewidth=2.2, label=level.kind)
+        ax.axhline(candidate.entry, color="#777777", linewidth=1.0, linestyle="--", label="Entry")
+        ax.axhline(candidate.stop, color="#d64b4b", linewidth=1.0, linestyle=":", label="SL")
+        if candidate.take_profits:
+            ax.axhline(candidate.take_profits[0], color="#149b68", linewidth=1.0, linestyle=":", label="TP1")
+        last_x = xs[-1]
+        last_close = closes[-1]
+        arrow_to = candidate.take_profits[0] if candidate.take_profits else last_close
+        arrow_y = arrow_to if candidate.side.upper() == "LONG" else arrow_to
+        ax.annotate(
+            "LONG ↑" if candidate.side.upper() == "LONG" else "SHORT ↓",
+            xy=(last_x, last_close),
+            xytext=(last_x + max(3, len(xs) // 12), arrow_y),
+            arrowprops={"arrowstyle": "->", "linewidth": 2.0, "color": "#111111"},
+            fontsize=12,
+            fontweight="bold",
+        )
+        ax.set_title(f"{display_symbol(candidate.symbol)} {candidate.side} · {level.kind} · {level.probability}%")
+        ax.set_xlabel(f"Свечи {candidate.timeframe}")
+        ax.set_ylabel("Цена")
+        ax.grid(True, alpha=0.25)
+        ax.legend(loc="best")
+        fig.tight_layout()
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png")
+        plt.close(fig)
+        buf.seek(0)
+        return buf.getvalue()
+    except Exception:
+        logging.exception("Не удалось построить график наклонного уровня")
+        return None
+
+
+def apply_slope_level_filter(candidate: Optional[SignalCandidate], candles: list[dict[str, float]]) -> Optional[SignalCandidate]:
+    if candidate is None or not SLOPE_LEVELS_ENABLED:
+        return candidate
+    level = detect_slope_level(candidate, candles)
+    if level is None:
+        return None
+    priority = (
+        level.touches >= SLOPE_LEVEL_MIN_TOUCHES + 1
+        and level.r2 >= 0.70
+        and abs(level.trend_score) >= SLOPE_LEVEL_TREND_SCORE_ABS + 1
+        and level.distance_atr <= SLOPE_LEVEL_MAX_ENTRY_ATR_DISTANCE * 0.75
+    )
+    new_probability = max(candidate.probability, level.probability)
+    if priority:
+        new_probability = max(new_probability, SLOPE_LEVEL_PRIORITY_PROBABILITY)
+    else:
+        new_probability = min(99, new_probability + SLOPE_LEVEL_PROBABILITY_BONUS)
+    reasons = (candidate.reasons + [
+        f"📐 Наклонка {level.probability}%: {level.kind}, {level.direction}",
+        *level.reasons[:5],
+    ])[:12]
+    chart_png = render_slope_level_chart(candidate, candles, level)
+    return SignalCandidate(
+        symbol=candidate.symbol,
+        side=candidate.side,
+        probability=max(SLOPE_LEVEL_MIN_LEVEL_PROBABILITY, min(99, int(new_probability))),
+        entry=candidate.entry,
+        stop=candidate.stop,
+        take_profits=list(candidate.take_profits),
+        reasons=reasons,
+        timeframe=candidate.timeframe,
+        trend=candidate.trend,
+        ai_optimizer=candidate.ai_optimizer,
+        is_super_deal=candidate.is_super_deal,
+        super_deal_score=candidate.super_deal_score,
+        slope_level=level,
+        slope_chart_png=chart_png,
+    )
+
+
 def super_deal_probability(candidate: SignalCandidate) -> int:
     """Итоговая проходимость для супер-сделки: 97-99% при максимальных условиях."""
     probability = max(SUPER_DEAL_MIN_PROBABILITY, candidate.probability + 2)
@@ -2913,6 +3573,8 @@ def apply_super_deal_filter(candidate: Optional[SignalCandidate]) -> Optional[Si
         ai_optimizer=candidate.ai_optimizer,
         is_super_deal=True,
         super_deal_score=trend_score,
+        slope_level=candidate.slope_level,
+        slope_chart_png=candidate.slope_chart_png,
     )
 
 
@@ -2929,16 +3591,27 @@ async def scan_market_detailed() -> ScanResult:
             async with semaphore:
                 signal_candles = await fetch_klines(session, symbol, SIGNAL_TIMEFRAME, KLINES_LIMIT)
                 trend_candles = None
-                if signal_candles and (TREND_FILTER_ENABLED or SUPER_DEAL_ENABLED):
+                btc_eth_candles: dict[str, Optional[list[dict[str, float]]]] = {}
+                if signal_candles:
+                    btc_eth_candles[SIGNAL_TIMEFRAME] = signal_candles
+                if signal_candles and (TREND_FILTER_ENABLED or SUPER_DEAL_ENABLED or BTC_ETH_ONLY_MODE_ENABLED or SLOPE_LEVELS_ENABLED):
                     if TREND_TIMEFRAME == SIGNAL_TIMEFRAME:
                         trend_candles = signal_candles
                     else:
                         if REQUEST_DELAY_SECONDS > 0:
                             await asyncio.sleep(REQUEST_DELAY_SECONDS)
                         trend_candles = await fetch_klines(session, symbol, TREND_TIMEFRAME, KLINES_LIMIT)
+                    btc_eth_candles[TREND_TIMEFRAME] = trend_candles
+                if signal_candles and BTC_ETH_ONLY_MODE_ENABLED and is_btc_eth_symbol(symbol):
+                    for tf in BTC_ETH_CONFIRMATION_TIMEFRAMES:
+                        if tf in btc_eth_candles:
+                            continue
+                        if REQUEST_DELAY_SECONDS > 0:
+                            await asyncio.sleep(REQUEST_DELAY_SECONDS)
+                        btc_eth_candles[tf] = await fetch_klines(session, symbol, tf, KLINES_LIMIT)
                 if REQUEST_DELAY_SECONDS > 0:
                     await asyncio.sleep(REQUEST_DELAY_SECONDS)
-                return signal_candles, trend_candles
+                return signal_candles, trend_candles, btc_eth_candles
 
         tasks = [limited_fetch(symbol) for symbol in symbols_to_scan]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -2949,7 +3622,7 @@ async def scan_market_detailed() -> ScanResult:
             result.skipped_symbols.append(symbol)
             continue
 
-        signal_candles, trend_candles = response
+        signal_candles, trend_candles, btc_eth_candles = response
         if signal_candles is None:
             result.failed_symbols += 1
             result.skipped_symbols.append(symbol)
@@ -2957,18 +3630,29 @@ async def scan_market_detailed() -> ScanResult:
 
         result.successful_symbols += 1
         candidate = analyze_candles(symbol, signal_candles)
-        if candidate and (TREND_FILTER_ENABLED or SUPER_DEAL_ENABLED):
+        if candidate and (TREND_FILTER_ENABLED or SUPER_DEAL_ENABLED or BTC_ETH_ONLY_MODE_ENABLED or SLOPE_LEVELS_ENABLED):
             trend = analyze_primary_trend(trend_candles, TREND_TIMEFRAME)
-            filtered = apply_trend_filter(candidate, trend)
-            if filtered is None:
-                if trend is None or trend.direction in {"UNKNOWN", "FLAT"}:
-                    result.trend_unknown += 1
+            if TREND_FILTER_ENABLED or SUPER_DEAL_ENABLED:
+                filtered = apply_trend_filter(candidate, trend)
+                if filtered is None:
+                    if trend is None or trend.direction in {"UNKNOWN", "FLAT"}:
+                        result.trend_unknown += 1
+                    else:
+                        result.trend_blocked += 1
+                    candidate = None
                 else:
-                    result.trend_blocked += 1
-                candidate = None
+                    result.trend_passed += 1
+                    candidate = filtered
             else:
-                result.trend_passed += 1
-                candidate = filtered
+                candidate = attach_trend_to_candidate(candidate, trend)
+        if candidate:
+            before_btc_eth = candidate
+            candidate = apply_btc_eth_only_filter(candidate, signal_candles, btc_eth_candles)
+            if BTC_ETH_ONLY_MODE_ENABLED:
+                if candidate is None:
+                    result.btc_eth_blocked += 1
+                elif candidate is not before_btc_eth:
+                    result.btc_eth_passed += 1
         if candidate:
             before_neural = candidate
             candidate = apply_neural_optimizer(candidate, signal_candles)
@@ -2987,6 +3671,14 @@ async def scan_market_detailed() -> ScanResult:
                     result.improvements_blocked += 1
                 elif candidate is not before_improvements:
                     result.improvements_passed += 1
+        if candidate:
+            before_slope = candidate
+            candidate = apply_slope_level_filter(candidate, signal_candles)
+            if SLOPE_LEVELS_ENABLED:
+                if candidate is None:
+                    result.slope_blocked += 1
+                elif candidate is not before_slope:
+                    result.slope_passed += 1
         if candidate:
             candidate = apply_super_deal_filter(candidate)
             if SUPER_DEAL_ENABLED:
@@ -3035,6 +3727,26 @@ async def broadcast_to_admins(bot: Bot, text: str) -> None:
             logging.exception("Не удалось отправить сообщение админу %s", admin_id)
 
 
+def slope_chart_caption(candidate: SignalCandidate) -> str:
+    level = candidate.slope_level
+    if level is None:
+        return f"📈 {display_symbol(candidate.symbol)} {candidate.side}"
+    return (
+        f"📐 Наклонный уровень: {display_symbol(candidate.symbol)} {candidate.side}\n"
+        f"Вероятность отработки: {level.probability}%\n"
+        f"Тип: {level.kind}\n"
+        f"Касаний: {level.touches}, расстояние: {level.distance_atr:.2f} ATR"
+    )
+
+
+async def send_candidate_signal_to_chat(bot: Bot, chat_id: int, text: str, candidate: SignalCandidate) -> None:
+    if candidate.slope_chart_png:
+        photo = BufferedInputFile(candidate.slope_chart_png, filename=f"{compact_symbol(candidate.symbol)}_slope.png")
+        await bot.send_photo(chat_id, photo=photo, caption=slope_chart_caption(candidate))
+        await asyncio.sleep(0.05)
+    await bot.send_message(chat_id, text)
+
+
 async def broadcast_signal(bot: Bot, candidate: SignalCandidate) -> tuple[int, int]:
     recipients = get_recipients()
     if not recipients:
@@ -3056,7 +3768,7 @@ async def broadcast_signal(bot: Bot, candidate: SignalCandidate) -> tuple[int, i
     failed_count = 0
     for chat_id in recipients:
         try:
-            await bot.send_message(chat_id, text)
+            await send_candidate_signal_to_chat(bot, chat_id, text, candidate)
             sent_count += 1
             await asyncio.sleep(0.05)
         except Exception:
@@ -3664,6 +4376,8 @@ async def open_autotrade_for_signal(bot: Bot, candidate: SignalCandidate) -> Opt
         "ai_optimizer": candidate.ai_optimizer,
         "is_super_deal": candidate.is_super_deal,
         "super_deal_score": candidate.super_deal_score,
+        "slope_levels_enabled": SLOPE_LEVELS_ENABLED,
+        "slope_level": slope_level_to_dict(candidate.slope_level),
         "entry": candidate.entry,
         "stop": candidate.stop,
         "take_profits": candidate.take_profits,
@@ -4167,23 +4881,39 @@ async def scan_single_symbol(symbol: str) -> tuple[Optional[SignalCandidate], bo
     async with aiohttp.ClientSession(timeout=timeout) as session:
         candles = await asyncio.wait_for(fetch_klines(session, normalized, SIGNAL_TIMEFRAME, KLINES_LIMIT), timeout=30)
         trend_candles = None
-        if candles and (TREND_FILTER_ENABLED or SUPER_DEAL_ENABLED):
+        btc_eth_candles: dict[str, Optional[list[dict[str, float]]]] = {}
+        if candles:
+            btc_eth_candles[SIGNAL_TIMEFRAME] = candles
+        if candles and (TREND_FILTER_ENABLED or SUPER_DEAL_ENABLED or BTC_ETH_ONLY_MODE_ENABLED or SLOPE_LEVELS_ENABLED):
             if TREND_TIMEFRAME == SIGNAL_TIMEFRAME:
                 trend_candles = candles
             else:
                 trend_candles = await asyncio.wait_for(fetch_klines(session, normalized, TREND_TIMEFRAME, KLINES_LIMIT), timeout=30)
+            btc_eth_candles[TREND_TIMEFRAME] = trend_candles
+        if candles and BTC_ETH_ONLY_MODE_ENABLED and is_btc_eth_symbol(normalized):
+            for tf in BTC_ETH_CONFIRMATION_TIMEFRAMES:
+                if tf in btc_eth_candles:
+                    continue
+                btc_eth_candles[tf] = await asyncio.wait_for(fetch_klines(session, normalized, tf, KLINES_LIMIT), timeout=30)
     if not candles:
         return None, False, 0
     candidate = analyze_candles(normalized, candles)
-    if candidate and (TREND_FILTER_ENABLED or SUPER_DEAL_ENABLED):
+    if candidate and (TREND_FILTER_ENABLED or SUPER_DEAL_ENABLED or BTC_ETH_ONLY_MODE_ENABLED or SLOPE_LEVELS_ENABLED):
         trend = analyze_primary_trend(trend_candles, TREND_TIMEFRAME)
-        candidate = apply_trend_filter(candidate, trend)
+        if TREND_FILTER_ENABLED or SUPER_DEAL_ENABLED:
+            candidate = apply_trend_filter(candidate, trend)
+        else:
+            candidate = attach_trend_to_candidate(candidate, trend)
+    if candidate:
+        candidate = apply_btc_eth_only_filter(candidate, candles, btc_eth_candles)
     if candidate:
         candidate = apply_neural_optimizer(candidate, candles)
     if candidate:
         candidate = apply_smart_algorithm(candidate)
     if candidate:
         candidate = apply_trading_improvements_filters(candidate, candles)
+    if candidate:
+        candidate = apply_slope_level_filter(candidate, candles)
     if candidate:
         candidate = apply_super_deal_filter(candidate)
     return candidate, True, len(candles)
@@ -4200,6 +4930,13 @@ async def answer_single_symbol_scan(message: Message, symbol_text: str) -> None:
     normalized = normalize_user_symbol(symbol_text)
     if not normalized:
         await message.answer("Не понял монету. Напиши, например: <code>BTC</code>, <code>XMR</code> или <code>BTCUSDT</code>.")
+        return
+
+    if BTC_ETH_ONLY_MODE_ENABLED and not is_btc_eth_symbol(normalized):
+        await message.answer(
+            "₿ Режим <b>Только BTC/ETH</b> включён. Сейчас бот анализирует только <b>BTCUSDT</b> и <b>ETHUSDT</b>. "
+            "Выключи режим в /settings → ₿ Только BTC/ETH, если хочешь сканировать другие монеты."
+        )
         return
 
     progress = await message.answer(f"🔎 Сканирую <b>{html.escape(display_symbol(normalized))}</b> на {html.escape(exchange_label())}...")
@@ -4251,6 +4988,11 @@ async def answer_single_symbol_scan(message: Message, symbol_text: str) -> None:
         text += f"\n\nℹ️ Ниже порога автоотправки: {candidate.probability}% < {MIN_SIGNAL_PROBABILITY}%."
 
     await safe_edit(progress, "✅ Ручной скан завершён")
+    if candidate.slope_chart_png:
+        await message.answer_photo(
+            BufferedInputFile(candidate.slope_chart_png, filename=f"{compact_symbol(candidate.symbol)}_slope.png"),
+            caption=slope_chart_caption(candidate),
+        )
     await message.answer(text)
 
 
@@ -4268,7 +5010,7 @@ async def cmd_start(message: Message) -> None:
         "Привет! Я Telegram-бот для автоматических торговых сигналов.\n\n"
         "Ты подписан на сигналы. Бот сам сканирует рынок и отправляет сетапы "
         f"с проходимостью от {MIN_SIGNAL_PROBABILITY}% и выше.\n\n"
-        "Команды: /help, /status, /settings, /scan, /super_deal, /improvements, /id, /stop",
+        "Команды: /help, /status, /settings, /scan, /super_deal, /btc_eth, /naklonki, /improvements, /id, /stop",
         reply_markup=keyboard,
     )
 
@@ -4286,6 +5028,8 @@ async def cmd_help(message: Message) -> None:
             "• /neural — нейро-оптимизатор алгоритмов\n"
             "• /trend — статус фильтра старшего тренда\n"
             "• /super_deal — режим супер-сделок 97-99% и trend score ±7\n"
+            "• /btc_eth — режим только BTC/ETH со строгими подтверждениями\n"
+            "• /naklonki — наклонные уровни: фильтр + график в сигнале\n"
             "• /improvements — Улучшения торговли ON/OFF\n"
             "• /stats — расширенная статистика сделок и фильтров\n"
             "• /panic — остановить автоторговлю, отменить защиту и закрыть позиции\n"
@@ -4312,6 +5056,8 @@ async def cmd_help(message: Message) -> None:
         "• /neural — нейро-оптимизатор алгоритмов\n"
         "• /trend — фильтр старшего тренда\n"
         "• /super_deal — режим супер-сделок\n"
+        "• /btc_eth — режим только BTC/ETH\n"
+        "• /naklonki — наклонные уровни + график\n"
         "• /improvements — Улучшения торговли\n"
         "• /stats — статистика торговли\n"
         "• /api — API ключи для автоторговли\n"
@@ -4355,6 +5101,8 @@ async def cmd_status(message: Message) -> None:
         f"Smart-история: <b>{html.escape(smart_learning_stats_text())}</b>\n"
         f"Фильтр тренда: <b>{html.escape(trend_filter_label())}</b>\n"
         f"Супер сделка: <b>{html.escape(super_deal_label())}</b>\n"
+        f"Только BTC/ETH: <b>{html.escape(btc_eth_only_label())}</b>\n"
+        f"Наклонки: <b>{html.escape(slope_levels_label())}</b>\n"
         f"Улучшения торговли: <b>{html.escape(trading_improvements_label())}</b>\n"
         f"Автоторговля: <b>{html.escape(autotrade_label())}</b>\n"
         f"API текущей биржи: <b>{'есть' if has_api_keys(MARKET_DATA_PROVIDER) else 'нет'}</b>\n"
@@ -4482,6 +5230,47 @@ async def cmd_super_deal(message: Message) -> None:
         "Сигнал будет начинаться с: <b>🔴🔴🔴 Внимание, есть супер сделка!</b>\n\n"
         "Важно: это не гарантия прибыли, а самый строгий технический фильтр.",
         reply_markup=super_deal_keyboard(),
+    )
+
+
+@dp.message(Command("btc_eth"))
+async def cmd_btc_eth(message: Message) -> None:
+    if not is_admin(message.from_user.id):
+        await message.answer("Настройка доступна только админу.")
+        return
+    await message.answer(
+        "<b>₿ Только BTC/ETH</b>\n\n"
+        f"Статус: <b>{html.escape(btc_eth_only_label())}</b>\n"
+        f"Монеты: <b>{', '.join(BTC_ETH_ONLY_SYMBOLS)}</b>\n"
+        f"Минимальная проходимость: <b>{BTC_ETH_ONLY_MIN_PROBABILITY}%</b>\n"
+        f"Trend score: <b>±{BTC_ETH_ONLY_TREND_SCORE_ABS}</b>\n"
+        f"Подтверждения ТФ: <b>{html.escape(', '.join(BTC_ETH_CONFIRMATION_TIMEFRAMES))}</b>\n"
+        f"Минимум подтверждённых ТФ: <b>{BTC_ETH_ONLY_MIN_TF_CONFIRMATIONS}</b>\n\n"
+        "Когда ON, бот ограничивает авто-скан и автоторговлю только BTCUSDT/ETHUSDT и включает дополнительный строгий фильтр: EMA, RSI, MACD, ATR, объём, тренд и несколько таймфреймов. "
+        "Это не гарантия прибыли, а более консервативный режим.",
+        reply_markup=btc_eth_only_keyboard(),
+    )
+
+
+@dp.message(Command("naklonki", "slope_levels", "slopes"))
+async def cmd_slope_levels(message: Message) -> None:
+    if not is_admin(message.from_user.id):
+        await message.answer("Настройка доступна только админу.")
+        return
+    await message.answer(
+        "<b>📐 Наклонки</b>\n\n"
+        f"Статус: <b>{html.escape(slope_levels_label())}</b>\n"
+        f"Фильтр: <b>LONG от восходящей поддержки / SHORT от нисходящего сопротивления</b>\n"
+        f"Lookback: <b>{SLOPE_LEVEL_LOOKBACK_CANDLES}</b> свечей\n"
+        f"Минимум касаний: <b>{SLOPE_LEVEL_MIN_TOUCHES}</b>\n"
+        f"Допуск касания: <b>{SLOPE_LEVEL_TOUCH_ATR_TOLERANCE:g} ATR</b>\n"
+        f"Макс. расстояние цены от уровня: <b>{SLOPE_LEVEL_MAX_ENTRY_ATR_DISTANCE:g} ATR</b>\n"
+        f"Минимальная вероятность уровня: <b>{SLOPE_LEVEL_MIN_LEVEL_PROBABILITY}%</b>\n"
+        f"Приоритет хороших наклонок: <b>{SLOPE_LEVEL_PRIORITY_PROBABILITY}%</b>\n"
+        f"Графики в сигнале: <b>{'ON' if SLOPE_LEVEL_SEND_CHARTS else 'OFF'}</b>\n\n"
+        "Когда ON, обычный сигнал сначала должен пройти базовые фильтры, затем бот ищет наклонный уровень. "
+        "Если линия, тренд и направление совпали, сделка получает повышенную проходимость и идёт в начало списка сигналов.",
+        reply_markup=slope_levels_keyboard(),
     )
 
 
@@ -4733,7 +5522,7 @@ async def cmd_close_trade(message: Message, command: CommandObject, bot: Bot) ->
 async def settings_callback(callback: CallbackQuery) -> None:
     global SIGNAL_TIMEFRAME, MIN_SIGNAL_PROBABILITY, SCAN_INTERVAL_SECONDS, MARKET_DATA_PROVIDER
     global AUTO_TRADE_MODE, TRADE_MARGIN_USDT, AUTO_CLOSE_TP_INDEX, SMART_ALGORITHM_ENABLED
-    global NEURAL_OPTIMIZER_ENABLED, SUPER_DEAL_ENABLED, TRADING_IMPROVEMENTS_ENABLED
+    global NEURAL_OPTIMIZER_ENABLED, SUPER_DEAL_ENABLED, BTC_ETH_ONLY_MODE_ENABLED, SLOPE_LEVELS_ENABLED, TRADING_IMPROVEMENTS_ENABLED
     global TREND_FILTER_ENABLED, TREND_TIMEFRAME
 
     if callback.from_user is None or not is_admin(callback.from_user.id):
@@ -4850,6 +5639,39 @@ async def settings_callback(callback: CallbackQuery) -> None:
             "Когда включено, бот не отправляет обычные сигналы и не открывает обычные сделки — "
             "только самые строгие супер-сделки. Это не гарантия прибыли.",
             reply_markup=super_deal_keyboard(),
+        )
+        await callback.answer()
+        return
+
+    if data == "settings:btc_eth_only":
+        await message.edit_text(
+            "<b>₿ Только BTC/ETH</b>\n\n"
+            f"Сейчас: <b>{html.escape(btc_eth_only_label())}</b>\n"
+            f"Монеты: <b>{', '.join(BTC_ETH_ONLY_SYMBOLS)}</b>\n"
+            f"Минимальная проходимость внутри режима: <b>{BTC_ETH_ONLY_MIN_PROBABILITY}%</b>\n"
+            f"Минимальный trend score: <b>±{BTC_ETH_ONLY_TREND_SCORE_ABS}</b>\n"
+            f"Подтверждения ТФ: <b>{html.escape(', '.join(BTC_ETH_CONFIRMATION_TIMEFRAMES))}</b>\n"
+            f"Нужно подтверждений: <b>{BTC_ETH_ONLY_MIN_TF_CONFIRMATIONS}</b>\n\n"
+            "ON = авто-скан и автоторговля смотрят только BTC/ETH и пропускают сигнал только если совпали EMA, RSI, MACD, ATR, объём, старший тренд и несколько ТФ. "
+            "Это повышает строгость, но не гарантирует прибыль.",
+            reply_markup=btc_eth_only_keyboard(),
+        )
+        await callback.answer()
+        return
+
+    if data == "settings:slope_levels":
+        await message.edit_text(
+            "<b>📐 Наклонки</b>\n\n"
+            f"Сейчас: <b>{html.escape(slope_levels_label())}</b>\n"
+            f"Минимальная база сигнала: <b>{SLOPE_LEVEL_MIN_BASE_PROBABILITY}%</b>\n"
+            f"Минимальная вероятность уровня: <b>{SLOPE_LEVEL_MIN_LEVEL_PROBABILITY}%</b>\n"
+            f"Приоритетная вероятность: <b>{SLOPE_LEVEL_PRIORITY_PROBABILITY}%</b>\n"
+            f"Минимум касаний: <b>{SLOPE_LEVEL_MIN_TOUCHES}</b>\n"
+            f"Макс. расстояние до линии: <b>{SLOPE_LEVEL_MAX_ENTRY_ATR_DISTANCE:g} ATR</b>\n"
+            f"Trend score: <b>±{SLOPE_LEVEL_TREND_SCORE_ABS}</b>\n\n"
+            "ON = бот отправляет сигнал и открывает авто-сделку только если наклонный уровень совпал со стороной сделки и основным трендом. "
+            "В сигнал прикладывается график с линией уровня и стрелкой направления. Это технический фильтр, не гарантия прибыли.",
+            reply_markup=slope_levels_keyboard(),
         )
         await callback.answer()
         return
@@ -5038,6 +5860,28 @@ async def settings_callback(callback: CallbackQuery) -> None:
             save_runtime_settings()
             await message.edit_text(settings_menu_text(), reply_markup=settings_keyboard())
             await callback.answer("Супер-сделка включена" if SUPER_DEAL_ENABLED else "Супер-сделка выключена")
+        else:
+            await callback.answer("Неверное значение", show_alert=True)
+        return
+
+    if data.startswith("settings:set_btc_eth_only:"):
+        value = data.split(":", 2)[2].lower()
+        if value in {"on", "off"}:
+            BTC_ETH_ONLY_MODE_ENABLED = value == "on"
+            save_runtime_settings()
+            await message.edit_text(settings_menu_text(), reply_markup=settings_keyboard())
+            await callback.answer("Режим BTC/ETH включён" if BTC_ETH_ONLY_MODE_ENABLED else "Режим BTC/ETH выключен")
+        else:
+            await callback.answer("Неверное значение", show_alert=True)
+        return
+
+    if data.startswith("settings:set_slope_levels:"):
+        value = data.split(":", 2)[2].lower()
+        if value in {"on", "off"}:
+            SLOPE_LEVELS_ENABLED = value == "on"
+            save_runtime_settings()
+            await message.edit_text(settings_menu_text(), reply_markup=settings_keyboard())
+            await callback.answer("Наклонки включены" if SLOPE_LEVELS_ENABLED else "Наклонки выключены")
         else:
             await callback.answer("Неверное значение", show_alert=True)
         return
@@ -5245,6 +6089,16 @@ async def button_trend(message: Message) -> None:
 @dp.message(F.text == "🔴 Супер сделка")
 async def button_super_deal(message: Message) -> None:
     await cmd_super_deal(message)
+
+
+@dp.message(F.text == "₿ Только BTC/ETH")
+async def button_btc_eth(message: Message) -> None:
+    await cmd_btc_eth(message)
+
+
+@dp.message(F.text == "📐 Наклонки")
+async def button_slope_levels(message: Message) -> None:
+    await cmd_slope_levels(message)
 
 
 @dp.message(F.text == "🚀 Улучшения торговли")
