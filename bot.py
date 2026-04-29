@@ -152,6 +152,15 @@ NEURAL_OPTIMIZER_HORIZON_CANDLES = max(3, min(80, int(os.getenv("NEURAL_OPTIMIZE
 NEURAL_OPTIMIZER_PROBABILITY_BONUS = max(0, min(15, int(os.getenv("NEURAL_OPTIMIZER_PROBABILITY_BONUS", "5"))))
 NEURAL_OPTIMIZER_MAX_PROFILES = max(3, min(20, int(os.getenv("NEURAL_OPTIMIZER_MAX_PROFILES", "10"))))
 
+# ---- Супер сделка ----
+# Когда включено, бот отправляет сигналы и открывает авто-сделки только при максимальных условиях:
+# базовый сигнал почти максимальный, тренд строго +7 для LONG или -7 для SHORT, итоговая проходимость 97-99%.
+# В Telegram нельзя реально покрасить текст сообщения в красный цвет, поэтому супер-сигналы выделяются красными эмодзи 🔴.
+SUPER_DEAL_ENABLED = os.getenv("SUPER_DEAL_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+SUPER_DEAL_MIN_PROBABILITY = max(97, min(99, int(os.getenv("SUPER_DEAL_MIN_PROBABILITY", "97"))))
+SUPER_DEAL_RAW_PROBABILITY_MIN = max(90, min(95, int(os.getenv("SUPER_DEAL_RAW_PROBABILITY_MIN", "95"))))
+SUPER_DEAL_TREND_SCORE_ABS = max(3, min(7, int(os.getenv("SUPER_DEAL_TREND_SCORE_ABS", "7"))))
+
 MAX_ACTIVE_TRADES = int(os.getenv("MAX_ACTIVE_TRADES", "1"))
 MAX_ACTIVE_TRADES = max(1, min(20, MAX_ACTIVE_TRADES))
 TRADE_MONITOR_INTERVAL_SECONDS = int(os.getenv("TRADE_MONITOR_INTERVAL_SECONDS", "20"))
@@ -199,13 +208,14 @@ def save_runtime_settings() -> None:
         "AUTO_CLOSE_TP_INDEX": AUTO_CLOSE_TP_INDEX,
         "SMART_ALGORITHM_ENABLED": SMART_ALGORITHM_ENABLED,
         "NEURAL_OPTIMIZER_ENABLED": NEURAL_OPTIMIZER_ENABLED,
+        "SUPER_DEAL_ENABLED": SUPER_DEAL_ENABLED,
     })
 
 
 def apply_runtime_settings(settings: dict[str, Any]) -> None:
     global MIN_SIGNAL_PROBABILITY, SIGNAL_TIMEFRAME, SCAN_INTERVAL_SECONDS, MARKET_DATA_PROVIDER
     global AUTO_TRADE_MODE, TRADE_MARGIN_USDT, AUTO_CLOSE_TP_INDEX, SMART_ALGORITHM_ENABLED
-    global NEURAL_OPTIMIZER_ENABLED
+    global NEURAL_OPTIMIZER_ENABLED, SUPER_DEAL_ENABLED
     global TREND_FILTER_ENABLED, TREND_TIMEFRAME
     try:
         probability = int(settings.get("MIN_SIGNAL_PROBABILITY", MIN_SIGNAL_PROBABILITY))
@@ -265,6 +275,12 @@ def apply_runtime_settings(settings: dict[str, Any]) -> None:
     else:
         NEURAL_OPTIMIZER_ENABLED = str(neural_raw).strip().lower() in {"1", "true", "yes", "on"}
 
+    super_raw = settings.get("SUPER_DEAL_ENABLED", SUPER_DEAL_ENABLED)
+    if isinstance(super_raw, bool):
+        SUPER_DEAL_ENABLED = super_raw
+    else:
+        SUPER_DEAL_ENABLED = str(super_raw).strip().lower() in {"1", "true", "yes", "on"}
+
 
 def human_interval(seconds: int) -> str:
     if seconds % 3600 == 0:
@@ -318,6 +334,15 @@ def trend_filter_label() -> str:
     return "OFF — сигналы без фильтра старшего ТФ"
 
 
+def super_deal_label() -> str:
+    if SUPER_DEAL_ENABLED:
+        return (
+            f"ON — только супер-сигналы {SUPER_DEAL_MIN_PROBABILITY}-99%, "
+            f"trend score ±{SUPER_DEAL_TREND_SCORE_ABS}"
+        )
+    return "OFF — обычные сигналы по текущим фильтрам"
+
+
 def settings_menu_text() -> str:
     return (
         "<b>⚙️ Настройки авто-бота</b>\n\n"
@@ -330,6 +355,7 @@ def settings_menu_text() -> str:
         f"AI-статус: <b>{html.escape(neural_optimizer_stats_text())}</b>\n"
         f"История smart: <b>{html.escape(smart_learning_stats_text())}</b>\n"
         f"Фильтр тренда: <b>{html.escape(trend_filter_label())}</b>\n"
+        f"Супер сделка: <b>{html.escape(super_deal_label())}</b>\n"
         f"Автоторговля: <b>{html.escape(autotrade_label())}</b>\n"
         f"Маржа/объём сделки: <b>${TRADE_MARGIN_USDT:g}</b>\n"
         f"Авто-закрытие: <b>SL или TP{AUTO_CLOSE_TP_INDEX}</b>\n\n"
@@ -348,6 +374,7 @@ def settings_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🧠 Умный алгоритм", callback_data="settings:smart")],
         [InlineKeyboardButton(text="🤖 Нейросети", callback_data="settings:neural")],
         [InlineKeyboardButton(text="🧭 Фильтр тренда", callback_data="settings:trend")],
+        [InlineKeyboardButton(text="🔴 Супер сделка", callback_data="settings:super_deal")],
         [InlineKeyboardButton(text="💰 Автоторговля", callback_data="settings:autotrade")],
         [InlineKeyboardButton(text="🔑 API ключи", callback_data="settings:api")],
         [InlineKeyboardButton(text="❌ Закрыть", callback_data="settings:close")],
@@ -478,6 +505,22 @@ def trend_timeframe_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def super_deal_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text=("✅ " if not SUPER_DEAL_ENABLED else "") + "OFF",
+                callback_data="settings:set_super_deal:off",
+            ),
+            InlineKeyboardButton(
+                text=("✅ " if SUPER_DEAL_ENABLED else "") + "ON",
+                callback_data="settings:set_super_deal:on",
+            ),
+        ],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:menu")],
+    ])
+
+
 def autotrade_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -544,7 +587,7 @@ keyboard = ReplyKeyboardMarkup(
         [KeyboardButton(text="🆔 Мой ID"), KeyboardButton(text="❓ Помощь")],
         [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="🧠 Умный алгоритм")],
         [KeyboardButton(text="🤖 Нейросети"), KeyboardButton(text="🧭 Фильтр тренда")],
-        [KeyboardButton(text="💰 Автоторговля")],
+        [KeyboardButton(text="🔴 Супер сделка"), KeyboardButton(text="💰 Автоторговля")],
         [KeyboardButton(text="🔑 API")],
         [KeyboardButton(text="🔕 Отписаться")],
     ],
@@ -574,6 +617,8 @@ class SignalCandidate:
     timeframe: str
     trend: Optional[TrendInfo] = None
     ai_optimizer: Optional[dict[str, Any]] = None
+    is_super_deal: bool = False
+    super_deal_score: int = 0
 
 
 @dataclass
@@ -605,6 +650,8 @@ class ScanResult:
     trend_unknown: int = 0
     neural_passed: int = 0
     neural_blocked: int = 0
+    super_deal_passed: int = 0
+    super_deal_blocked: int = 0
     data_provider: str = MARKET_DATA_PROVIDER
     scanned_at: float = field(default_factory=time.time)
 
@@ -1217,6 +1264,8 @@ def apply_neural_optimizer(candidate: Optional[SignalCandidate], candles: list[d
         timeframe=candidate.timeframe,
         trend=candidate.trend,
         ai_optimizer=neural_result_to_dict(result),
+        is_super_deal=candidate.is_super_deal,
+        super_deal_score=candidate.super_deal_score,
     )
 
 
@@ -1232,6 +1281,8 @@ def clone_candidate(candidate: SignalCandidate, probability: int, reasons: Optio
         timeframe=candidate.timeframe,
         trend=candidate.trend,
         ai_optimizer=candidate.ai_optimizer,
+        is_super_deal=candidate.is_super_deal,
+        super_deal_score=candidate.super_deal_score,
     )
 
 
@@ -1457,10 +1508,16 @@ def structured_signal_text(
     comment: str = "",
     timeframe: str = "",
     auto: bool = False,
+    super_deal: bool = False,
 ) -> str:
     side_clean = side.upper()
     emoji = "🟢" if side_clean == "LONG" else "🔴"
     title_prefix = "🤖 Авто-сигнал" if auto else "Сигнал"
+    alert_prefix = ""
+    if super_deal:
+        emoji = "🔴"
+        title_prefix = "🚨 Супер-сигнал"
+        alert_prefix = "🔴🔴🔴 <b>Внимание, есть супер сделка!</b>\n"
 
     stop_pct = pct_from_entry(stop, entry)
     tp_lines = []
@@ -1477,7 +1534,7 @@ def structured_signal_text(
     timeframe_block = f"\nТаймфрейм: <b>{html.escape(timeframe)}</b>" if timeframe else ""
 
     return (
-        f"{emoji} <b>{title_prefix}: {html.escape(symbol.upper())} / {html.escape(side_clean)}</b>\n"
+        f"{alert_prefix}{emoji} <b>{title_prefix}: {html.escape(symbol.upper())} / {html.escape(side_clean)}</b>\n"
         f"Проходимость: <b>{probability}%</b>{timeframe_block}\n\n"
         f"🎯 Вход: <b>{html.escape(fmt_price(entry))}</b>\n"
         f"🛑 Стоп-лосс: <b>{html.escape(fmt_price(stop))}</b> "
@@ -1499,6 +1556,7 @@ def scan_summary_text(scan: ScanResult, title: str = "🧪 Отчёт авто-�
         f"AI-статус: <b>{html.escape(neural_optimizer_stats_text())}</b>",
         f"Smart-история: <b>{html.escape(smart_learning_stats_text())}</b>",
         f"Фильтр тренда: <b>{html.escape(trend_filter_label())}</b>",
+        f"Супер сделка: <b>{html.escape(super_deal_label())}</b>",
         f"Данные получены: <b>{scan.successful_symbols}</b> / {scan.total_symbols or len(SYMBOLS)}",
         f"Ошибки/нет пары: <b>{scan.failed_symbols}</b>",
     ]
@@ -1511,6 +1569,11 @@ def scan_summary_text(scan: ScanResult, title: str = "🧪 Отчёт авто-�
         lines.append(
             f"AI-оптимизатор: пропущено <b>{scan.neural_passed}</b>, "
             f"отсечено <b>{scan.neural_blocked}</b>"
+        )
+    if SUPER_DEAL_ENABLED:
+        lines.append(
+            f"Супер-сделки: найдено <b>{scan.super_deal_passed}</b>, "
+            f"отсечено <b>{scan.super_deal_blocked}</b>"
         )
     if scan.sendable:
         lines.append("\n<b>Найдены сигналы  выше порога:</b>")
@@ -2197,7 +2260,7 @@ def analyze_primary_trend(candles: Optional[list[dict[str, float]]], timeframe: 
 
 
 def apply_trend_filter(candidate: Optional[SignalCandidate], trend: Optional[TrendInfo]) -> Optional[SignalCandidate]:
-    if candidate is None or not TREND_FILTER_ENABLED:
+    if candidate is None or not (TREND_FILTER_ENABLED or SUPER_DEAL_ENABLED):
         return candidate
     if trend is None or trend.direction in {"UNKNOWN", "FLAT"}:
         return None
@@ -2225,6 +2288,8 @@ def apply_trend_filter(candidate: Optional[SignalCandidate], trend: Optional[Tre
         timeframe=candidate.timeframe,
         trend=trend,
         ai_optimizer=candidate.ai_optimizer,
+        is_super_deal=candidate.is_super_deal,
+        super_deal_score=candidate.super_deal_score,
     )
 
 
@@ -2372,6 +2437,66 @@ def analyze_candles(symbol: str, candles: list[dict[str, float]]) -> Optional[Si
     return SignalCandidate(symbol=symbol, side=side, probability=probability, entry=entry, stop=stop, take_profits=tps, reasons=reasons[:5], timeframe=SIGNAL_TIMEFRAME)
 
 
+def super_deal_probability(candidate: SignalCandidate) -> int:
+    """Итоговая проходимость для супер-сделки: 97-99% при максимальных условиях."""
+    probability = max(SUPER_DEAL_MIN_PROBABILITY, candidate.probability + 2)
+    trend_abs = abs(candidate.trend.score) if candidate.trend else 0
+    if trend_abs >= SUPER_DEAL_TREND_SCORE_ABS:
+        probability += 1
+    ai = candidate.ai_optimizer or {}
+    try:
+        if float(ai.get("win_rate") or 0) >= 0.65 and float(ai.get("profit_factor") or 0) >= 1.4:
+            probability += 1
+    except Exception:
+        pass
+    return max(SUPER_DEAL_MIN_PROBABILITY, min(99, int(probability)))
+
+
+def is_super_deal_candidate(candidate: Optional[SignalCandidate]) -> bool:
+    if candidate is None:
+        return False
+    if candidate.probability < SUPER_DEAL_RAW_PROBABILITY_MIN:
+        return False
+    trend = candidate.trend
+    if trend is None:
+        return False
+    side = candidate.side.upper()
+    direction = trend.direction.upper()
+    if side == "LONG":
+        return direction == "BULL" and trend.score >= SUPER_DEAL_TREND_SCORE_ABS
+    if side == "SHORT":
+        return direction == "BEAR" and trend.score <= -SUPER_DEAL_TREND_SCORE_ABS
+    return False
+
+
+def apply_super_deal_filter(candidate: Optional[SignalCandidate]) -> Optional[SignalCandidate]:
+    if candidate is None or not SUPER_DEAL_ENABLED:
+        return candidate
+    if not is_super_deal_candidate(candidate):
+        return None
+
+    probability = super_deal_probability(candidate)
+    trend_score = candidate.trend.score if candidate.trend else 0
+    super_reason = (
+        f"🔴 Супер сделка: проходимость {probability}%, "
+        f"тренд score {trend_score:+d}, условия максимальные"
+    )
+    return SignalCandidate(
+        symbol=candidate.symbol,
+        side=candidate.side,
+        probability=probability,
+        entry=candidate.entry,
+        stop=candidate.stop,
+        take_profits=list(candidate.take_profits),
+        reasons=(candidate.reasons + [super_reason])[:9],
+        timeframe=candidate.timeframe,
+        trend=candidate.trend,
+        ai_optimizer=candidate.ai_optimizer,
+        is_super_deal=True,
+        super_deal_score=trend_score,
+    )
+
+
 async def scan_market_detailed() -> ScanResult:
     result = ScanResult(data_provider=MARKET_DATA_PROVIDER)
     candidates: list[SignalCandidate] = []
@@ -2385,7 +2510,7 @@ async def scan_market_detailed() -> ScanResult:
             async with semaphore:
                 signal_candles = await fetch_klines(session, symbol, SIGNAL_TIMEFRAME, KLINES_LIMIT)
                 trend_candles = None
-                if signal_candles and TREND_FILTER_ENABLED:
+                if signal_candles and (TREND_FILTER_ENABLED or SUPER_DEAL_ENABLED):
                     if TREND_TIMEFRAME == SIGNAL_TIMEFRAME:
                         trend_candles = signal_candles
                     else:
@@ -2413,7 +2538,7 @@ async def scan_market_detailed() -> ScanResult:
 
         result.successful_symbols += 1
         candidate = analyze_candles(symbol, signal_candles)
-        if candidate and TREND_FILTER_ENABLED:
+        if candidate and (TREND_FILTER_ENABLED or SUPER_DEAL_ENABLED):
             trend = analyze_primary_trend(trend_candles, TREND_TIMEFRAME)
             filtered = apply_trend_filter(candidate, trend)
             if filtered is None:
@@ -2435,6 +2560,13 @@ async def scan_market_detailed() -> ScanResult:
                     result.neural_passed += 1
         if candidate:
             candidate = apply_smart_algorithm(candidate)
+        if candidate:
+            candidate = apply_super_deal_filter(candidate)
+            if SUPER_DEAL_ENABLED:
+                if candidate is None:
+                    result.super_deal_blocked += 1
+                else:
+                    result.super_deal_passed += 1
         if candidate:
             candidates.append(candidate)
 
@@ -2491,6 +2623,7 @@ async def broadcast_signal(bot: Bot, candidate: SignalCandidate) -> tuple[int, i
         comment=reasons_text,
         timeframe=candidate.timeframe,
         auto=True,
+        super_deal=candidate.is_super_deal,
     )
     sent_count = 0
     failed_count = 0
@@ -2944,6 +3077,8 @@ async def open_autotrade_for_signal(bot: Bot, candidate: SignalCandidate) -> Opt
         "trend": trend_to_dict(candidate.trend),
         "neural_optimizer_enabled": NEURAL_OPTIMIZER_ENABLED,
         "ai_optimizer": candidate.ai_optimizer,
+        "is_super_deal": candidate.is_super_deal,
+        "super_deal_score": candidate.super_deal_score,
         "entry": candidate.entry,
         "stop": candidate.stop,
         "take_profits": candidate.take_profits,
@@ -3276,7 +3411,7 @@ async def scan_single_symbol(symbol: str) -> tuple[Optional[SignalCandidate], bo
     async with aiohttp.ClientSession(timeout=timeout) as session:
         candles = await asyncio.wait_for(fetch_klines(session, normalized, SIGNAL_TIMEFRAME, KLINES_LIMIT), timeout=30)
         trend_candles = None
-        if candles and TREND_FILTER_ENABLED:
+        if candles and (TREND_FILTER_ENABLED or SUPER_DEAL_ENABLED):
             if TREND_TIMEFRAME == SIGNAL_TIMEFRAME:
                 trend_candles = candles
             else:
@@ -3284,13 +3419,15 @@ async def scan_single_symbol(symbol: str) -> tuple[Optional[SignalCandidate], bo
     if not candles:
         return None, False, 0
     candidate = analyze_candles(normalized, candles)
-    if candidate and TREND_FILTER_ENABLED:
+    if candidate and (TREND_FILTER_ENABLED or SUPER_DEAL_ENABLED):
         trend = analyze_primary_trend(trend_candles, TREND_TIMEFRAME)
         candidate = apply_trend_filter(candidate, trend)
     if candidate:
         candidate = apply_neural_optimizer(candidate, candles)
     if candidate:
         candidate = apply_smart_algorithm(candidate)
+    if candidate:
+        candidate = apply_super_deal_filter(candidate)
     return candidate, True, len(candles)
 
 
@@ -3350,6 +3487,7 @@ async def answer_single_symbol_scan(message: Message, symbol_text: str) -> None:
         comment=reasons_text,
         timeframe=candidate.timeframe,
         auto=False,
+        super_deal=candidate.is_super_deal,
     )
     if candidate.probability < MIN_SIGNAL_PROBABILITY:
         text += f"\n\nℹ️ Ниже порога автоотправки: {candidate.probability}% < {MIN_SIGNAL_PROBABILITY}%."
@@ -3372,7 +3510,7 @@ async def cmd_start(message: Message) -> None:
         "Привет! Я Telegram-бот для автоматических торговых сигналов.\n\n"
         "Ты подписан на сигналы. Бот сам сканирует рынок и отправляет сетапы "
         f"с проходимостью от {MIN_SIGNAL_PROBABILITY}% и выше.\n\n"
-        "Команды: /help, /status, /settings, /scan, /id, /stop",
+        "Команды: /help, /status, /settings, /scan, /super_deal, /id, /stop",
         reply_markup=keyboard,
     )
 
@@ -3389,6 +3527,7 @@ async def cmd_help(message: Message) -> None:
             "• /smart — статус умного алгоритма\n"
             "• /neural — нейро-оптимизатор алгоритмов\n"
             "• /trend — статус фильтра старшего тренда\n"
+            "• /super_deal — режим супер-сделок 97-99% и trend score ±7\n"
             "• /api — API ключи для LIVE-торговли\n"
             "• /margin 10 — маржа/объём на сделку в USDT\n"
             "• /trades — активные авто-сделки\n"
@@ -3411,6 +3550,7 @@ async def cmd_help(message: Message) -> None:
         "• /smart — статистика умного алгоритма\n"
         "• /neural — нейро-оптимизатор алгоритмов\n"
         "• /trend — фильтр старшего тренда\n"
+        "• /super_deal — режим супер-сделок\n"
         "• /api — API ключи для автоторговли\n"
         "• /trades — активные авто-сделки\n"
         "• /close_trade ID — ручное закрытие авто-сделки\n"
@@ -3451,6 +3591,7 @@ async def cmd_status(message: Message) -> None:
         f"AI-статус: <b>{html.escape(neural_optimizer_stats_text())}</b>\n"
         f"Smart-история: <b>{html.escape(smart_learning_stats_text())}</b>\n"
         f"Фильтр тренда: <b>{html.escape(trend_filter_label())}</b>\n"
+        f"Супер сделка: <b>{html.escape(super_deal_label())}</b>\n"
         f"Автоторговля: <b>{html.escape(autotrade_label())}</b>\n"
         f"API текущей биржи: <b>{'есть' if has_api_keys(MARKET_DATA_PROVIDER) else 'нет'}</b>\n"
         f"Маржа/объём сделки: <b>${TRADE_MARGIN_USDT:g}</b>\n"
@@ -3558,6 +3699,25 @@ async def cmd_trend(message: Message) -> None:
         "LONG проходит только при бычьем тренде, SHORT — только при медвежьем. "
         "Флэт/неясный тренд отсекается. Фильтр применяется и к отправке сигналов, и к авто-открытию сделок.",
         reply_markup=trend_filter_keyboard(),
+    )
+
+
+@dp.message(Command("super_deal"))
+async def cmd_super_deal(message: Message) -> None:
+    if not is_admin(message.from_user.id):
+        await message.answer("Настройка доступна только админу.")
+        return
+    await message.answer(
+        "<b>🔴 Супер сделка</b>\n\n"
+        f"Статус: <b>{html.escape(super_deal_label())}</b>\n"
+        f"Итоговая проходимость: <b>{SUPER_DEAL_MIN_PROBABILITY}-99%</b>\n"
+        f"Минимум базовой проходимости: <b>{SUPER_DEAL_RAW_PROBABILITY_MIN}%</b>\n"
+        f"Обязательный trend score: <b>+{SUPER_DEAL_TREND_SCORE_ABS}</b> для LONG или <b>-{SUPER_DEAL_TREND_SCORE_ABS}</b> для SHORT\n"
+        f"Таймфрейм тренда: <b>{html.escape(TREND_TIMEFRAME)}</b>\n\n"
+        "Когда включено, бот отсекает все обычные сетапы и отправляет/открывает только супер-сделки. "
+        "Сигнал будет начинаться с: <b>🔴🔴🔴 Внимание, есть супер сделка!</b>\n\n"
+        "Важно: это не гарантия прибыли, а самый строгий технический фильтр.",
+        reply_markup=super_deal_keyboard(),
     )
 
 
@@ -3729,7 +3889,7 @@ async def cmd_close_trade(message: Message, command: CommandObject, bot: Bot) ->
 async def settings_callback(callback: CallbackQuery) -> None:
     global SIGNAL_TIMEFRAME, MIN_SIGNAL_PROBABILITY, SCAN_INTERVAL_SECONDS, MARKET_DATA_PROVIDER
     global AUTO_TRADE_MODE, TRADE_MARGIN_USDT, AUTO_CLOSE_TP_INDEX, SMART_ALGORITHM_ENABLED
-    global NEURAL_OPTIMIZER_ENABLED
+    global NEURAL_OPTIMIZER_ENABLED, SUPER_DEAL_ENABLED
     global TREND_FILTER_ENABLED, TREND_TIMEFRAME
 
     if callback.from_user is None or not is_admin(callback.from_user.id):
@@ -3833,6 +3993,19 @@ async def settings_callback(callback: CallbackQuery) -> None:
             f"<b>⏱ Выбери старший таймфрейм тренда</b>\n\nСейчас: <b>{html.escape(TREND_TIMEFRAME)}</b>\n\n"
             "Для LIVE обычно разумно 1h или 4h. Чем выше ТФ, тем меньше сигналов, но меньше шума.",
             reply_markup=trend_timeframe_keyboard(),
+        )
+        await callback.answer()
+        return
+
+    if data == "settings:super_deal":
+        await message.edit_text(
+            "<b>🔴 Супер сделка</b>\n\n"
+            f"Сейчас: <b>{html.escape(super_deal_label())}</b>\n"
+            f"Условия: проходимость <b>{SUPER_DEAL_MIN_PROBABILITY}-99%</b>, "
+            f"trend score <b>+{SUPER_DEAL_TREND_SCORE_ABS}</b> для LONG или <b>-{SUPER_DEAL_TREND_SCORE_ABS}</b> для SHORT.\n\n"
+            "Когда включено, бот не отправляет обычные сигналы и не открывает обычные сделки — "
+            "только самые строгие супер-сделки. Это не гарантия прибыли.",
+            reply_markup=super_deal_keyboard(),
         )
         await callback.answer()
         return
@@ -3998,6 +4171,17 @@ async def settings_callback(callback: CallbackQuery) -> None:
             await callback.answer(f"Старший ТФ тренда: {value}")
         else:
             await callback.answer("Неверный таймфрейм тренда", show_alert=True)
+        return
+
+    if data.startswith("settings:set_super_deal:"):
+        value = data.split(":", 2)[2].lower()
+        if value in {"on", "off"}:
+            SUPER_DEAL_ENABLED = value == "on"
+            save_runtime_settings()
+            await message.edit_text(settings_menu_text(), reply_markup=settings_keyboard())
+            await callback.answer("Супер-сделка включена" if SUPER_DEAL_ENABLED else "Супер-сделка выключена")
+        else:
+            await callback.answer("Неверное значение", show_alert=True)
         return
 
     if data.startswith("settings:set_autotrade_mode:"):
@@ -4187,6 +4371,11 @@ async def button_neural(message: Message) -> None:
 @dp.message(F.text == "🧭 Фильтр тренда")
 async def button_trend(message: Message) -> None:
     await cmd_trend(message)
+
+
+@dp.message(F.text == "🔴 Супер сделка")
+async def button_super_deal(message: Message) -> None:
+    await cmd_super_deal(message)
 
 
 @dp.message(F.text == "💰 Автоторговля")
