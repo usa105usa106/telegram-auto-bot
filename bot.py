@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BOT_STARTED_AT = time.time()
-BOT_VERSION = "1022"
+BOT_VERSION = "1023"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
@@ -238,6 +238,21 @@ WALK_FORWARD_OPTIMIZER_ENABLED = True
 WALK_FORWARD_TRAIN_RATIO = 0.7
 WALK_FORWARD_MIN_TEST_TRADES = 2
 
+# ---- ETH Profit ----
+# Изолированный режим глубокого анализа ETH. Когда ON, авто-скан/автоторговля
+# ставятся на паузу, а ручной ввод "eth profit" запускает многофакторный
+# анализ ETH по таймфреймам, истории похожих паттернов, сессиям, объёмам,
+# funding, тренду, поддержкам/сопротивлениям и даёт план сделки.
+ETH_PROFIT_MODE_ENABLED = False
+ETH_PROFIT_SYMBOL = "ETHUSDT"
+ETH_PROFIT_MIN_TRADE_PROBABILITY = 65
+ETH_PROFIT_STRONG_TRADE_PROBABILITY = 75
+ETH_PROFIT_RISK_PERCENT = 0.5
+ETH_PROFIT_MAX_RISK_PERCENT = 1.0
+ETH_PROFIT_MAX_LEVERAGE = 3
+ETH_PROFIT_NEWS_ENABLED = True
+CRYPTOPANIC_TOKEN = os.getenv("CRYPTOPANIC_TOKEN", "").strip()
+
 MAX_ACTIVE_TRADES = 3
 MAX_ACTIVE_TRADES = max(1, min(20, MAX_ACTIVE_TRADES))
 TRADE_MONITOR_INTERVAL_SECONDS = 20
@@ -332,6 +347,7 @@ def save_runtime_settings() -> None:
         "SLOPE_LEVELS_MODE": SLOPE_LEVELS_MODE,
         "TRADING_IMPROVEMENTS_ENABLED": TRADING_IMPROVEMENTS_ENABLED,
         "TRADE_POLISHING_ENABLED": TRADE_POLISHING_ENABLED,
+        "ETH_PROFIT_MODE_ENABLED": ETH_PROFIT_MODE_ENABLED,
     })
 
 
@@ -339,6 +355,7 @@ def apply_runtime_settings(settings: dict[str, Any]) -> None:
     global AUTO_SIGNALS_ENABLED, MIN_SIGNAL_PROBABILITY, SIGNAL_TIMEFRAME, SCAN_INTERVAL_SECONDS, SIGNAL_COOLDOWN_MINUTES, MAX_SIGNALS_PER_SCAN, MARKET_DATA_PROVIDER
     global AUTO_TRADE_MODE, TRADE_MARGIN_USDT, AUTO_CLOSE_TP_INDEX, SMART_ALGORITHM_ENABLED
     global NEURAL_OPTIMIZER_ENABLED, SUPER_DEAL_ENABLED, BTC_ETH_ONLY_MODE_ENABLED, SLOPE_LEVELS_ENABLED, SLOPE_LEVELS_MODE, TRADING_IMPROVEMENTS_ENABLED, TRADE_POLISHING_ENABLED
+    global ETH_PROFIT_MODE_ENABLED
     global TREND_FILTER_ENABLED, TREND_TIMEFRAME
 
     auto_raw = settings.get("AUTO_SIGNALS_ENABLED", AUTO_SIGNALS_ENABLED)
@@ -453,6 +470,12 @@ def apply_runtime_settings(settings: dict[str, Any]) -> None:
         TRADE_POLISHING_ENABLED = polishing_raw
     else:
         TRADE_POLISHING_ENABLED = str(polishing_raw).strip().lower() in {"1", "true", "yes", "on"}
+
+    eth_profit_raw = settings.get("ETH_PROFIT_MODE_ENABLED", ETH_PROFIT_MODE_ENABLED)
+    if isinstance(eth_profit_raw, bool):
+        ETH_PROFIT_MODE_ENABLED = eth_profit_raw
+    else:
+        ETH_PROFIT_MODE_ENABLED = str(eth_profit_raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def human_interval(seconds: int) -> str:
@@ -588,6 +611,16 @@ def trade_polishing_label() -> str:
     return "OFF — без дополнительной полировки входа"
 
 
+def eth_profit_label() -> str:
+    if ETH_PROFIT_MODE_ENABLED:
+        return "ON — авто-скан/автоторговля на паузе; команда: eth profit"
+    return "OFF — обычный режим бота"
+
+
+def eth_profit_blocks_trading() -> bool:
+    return bool(ETH_PROFIT_MODE_ENABLED)
+
+
 def auto_signals_label() -> str:
     return "ON — авто-скан отправляет сигналы" if AUTO_SIGNALS_ENABLED else "OFF — авто-скан выключен"
 
@@ -612,6 +645,7 @@ def settings_menu_text() -> str:
         f"Наклонки: <b>{html.escape(slope_levels_label())}</b>\n"
         f"Улучшения торговли: <b>{html.escape(trading_improvements_label())}</b>\n"
         f"Полировка торговли: <b>{html.escape(trade_polishing_label())}</b>\n"
+        f"ETH Profit: <b>{html.escape(eth_profit_label())}</b>\n"
         f"Автоторговля: <b>{html.escape(autotrade_label())}</b>\n"
         f"Маржа/объём сделки: <b>${TRADE_MARGIN_USDT:g}</b>\n"
         f"Авто-закрытие: <b>SL или TP{AUTO_CLOSE_TP_INDEX}</b>\n\n"
@@ -640,6 +674,7 @@ def settings_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📐 Наклонки", callback_data="settings:slope_levels")],
         [InlineKeyboardButton(text="🚀 Улучшения торговли", callback_data="settings:improvements")],
         [InlineKeyboardButton(text="✨ Полировка торговли", callback_data="settings:polishing")],
+        [InlineKeyboardButton(text="💎 ETH Profit", callback_data="settings:eth_profit")],
         [InlineKeyboardButton(text="💰 Автоторговля", callback_data="settings:autotrade")],
         [InlineKeyboardButton(text="🔑 API ключи", callback_data="settings:api")],
         [InlineKeyboardButton(text="❌ Закрыть", callback_data="settings:close")],
@@ -904,6 +939,23 @@ def trade_polishing_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def eth_profit_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text=("✅ " if not ETH_PROFIT_MODE_ENABLED else "") + "OFF",
+                callback_data="settings:set_eth_profit:off",
+            ),
+            InlineKeyboardButton(
+                text=("✅ " if ETH_PROFIT_MODE_ENABLED else "") + "ON",
+                callback_data="settings:set_eth_profit:on",
+            ),
+        ],
+        [InlineKeyboardButton(text="🔎 Запустить ETH Profit", callback_data="settings:run_eth_profit")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:menu")],
+    ])
+
+
 def autotrade_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -972,8 +1024,9 @@ keyboard = ReplyKeyboardMarkup(
         [KeyboardButton(text="🤖 Нейросети"), KeyboardButton(text="🧭 Фильтр тренда")],
         [KeyboardButton(text="🔴 Супер сделка"), KeyboardButton(text="₿ Только BTC/ETH")],
         [KeyboardButton(text="📐 Наклонки"), KeyboardButton(text="🚀 Улучшения торговли")],
-        [KeyboardButton(text="✨ Полировка торговли"), KeyboardButton(text="💰 Автоторговля")],
-        [KeyboardButton(text="🔑 API"), KeyboardButton(text="🔕 Отписаться")],
+        [KeyboardButton(text="✨ Полировка торговли"), KeyboardButton(text="💎 ETH Profit")],
+        [KeyboardButton(text="💰 Автоторговля"), KeyboardButton(text="🔑 API")],
+        [KeyboardButton(text="🔕 Отписаться")],
         [KeyboardButton(text="🏓 Ping")],
     ],
     resize_keyboard=True,
@@ -5142,6 +5195,9 @@ async def ensure_live_protection(bot: Bot, trade: dict[str, Any]) -> None:
 
 
 async def open_autotrade_for_signal(bot: Bot, candidate: SignalCandidate) -> Optional[dict[str, Any]]:
+    if eth_profit_blocks_trading():
+        await broadcast_to_admins(bot, "💎 ETH Profit включён: автоторговля на паузе, сделка не открыта.")
+        return None
     if not autotrading_is_enabled():
         return None
 
@@ -5698,6 +5754,8 @@ async def run_auto_scan_once(
     ignore_cooldown: bool = False,
     allow_trading: bool = True,
 ) -> tuple[ScanResult, list[SignalCandidate], list[SignalCandidate]]:
+    if eth_profit_blocks_trading():
+        return ScanResult(total_symbols=0), [], []
     scan = await scan_market_detailed()
     sent_candidates: list[SignalCandidate] = []
     skipped_by_cooldown: list[SignalCandidate] = []
@@ -5733,6 +5791,10 @@ async def auto_signal_worker(bot: Bot) -> None:
     scan_number = 0
     while True:
         try:
+            if eth_profit_blocks_trading():
+                logging.info("ETH Profit включён: авто-сканер на паузе")
+                await asyncio.sleep(SCAN_INTERVAL_SECONDS)
+                continue
             scan_number += 1
             scan, sent, skipped = await run_auto_scan_once(bot)
             if AUTO_SCAN_REPORTS_TO_ADMINS and scan_number % AUTO_SCAN_REPORT_EVERY_N_SCANS == 0:
@@ -5936,6 +5998,651 @@ async def answer_single_symbol_scan(message: Message, symbol_text: str) -> None:
     await message.answer(text)
 
 
+# ---------- ETH Profit deep analysis ----------
+
+def eth_profit_status_text() -> str:
+    return (
+        "<b>💎 ETH Profit</b>\n\n"
+        f"Статус: <b>{html.escape(eth_profit_label())}</b>\n"
+        f"Монета: <b>{html.escape(display_symbol(ETH_PROFIT_SYMBOL))}</b>\n"
+        f"Риск в расчёте: <b>{ETH_PROFIT_RISK_PERCENT:g}%</b> от депозита, максимум <b>{ETH_PROFIT_MAX_RISK_PERCENT:g}%</b>\n"
+        f"Максимальное плечо в рекомендации: <b>x{ETH_PROFIT_MAX_LEVERAGE}</b>\n"
+        f"Новостной фон: <b>{'CryptoPanic включён' if CRYPTOPANIC_TOKEN else 'нет токена CRYPTOPANIC_TOKEN, новости считаются нейтральными'}</b>\n\n"
+        "Когда режим ON, авто-скан и автоторговля стоят на паузе. "
+        "Ручной ввод <code>eth profit</code> запускает глубокий анализ ETH по год/месяц/неделя/день/4h/1h/15m/5m, "
+        "истории похожих паттернов, сессиям Азии/Америки, объёмам, funding, тренду, поддержке/сопротивлению, "
+        "после чего бот выдаёт план LONG/SHORT. Это техническая оценка, не гарантия прибыли."
+    )
+
+
+def clamp_float(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def pct_change(start: float, end: float) -> float:
+    if start <= 0:
+        return 0.0
+    return (end - start) / start * 100.0
+
+
+def candle_return_pct(candle: dict[str, float]) -> float:
+    return pct_change(float(candle.get("open") or 0), float(candle.get("close") or 0))
+
+
+def simple_linear_slope_pct(closes: list[float]) -> float:
+    if len(closes) < 3 or closes[0] <= 0:
+        return 0.0
+    n = len(closes)
+    xs = list(range(n))
+    mean_x = (n - 1) / 2.0
+    mean_y = sum(closes) / n
+    denom = sum((x - mean_x) ** 2 for x in xs)
+    if denom <= 0:
+        return 0.0
+    slope = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, closes)) / denom
+    return (slope * (n - 1)) / closes[0] * 100.0
+
+
+def nearest_levels(candles: list[dict[str, float]], lookback: int = 120) -> dict[str, float]:
+    recent = candles[-min(len(candles), lookback):]
+    if not recent:
+        return {"support": 0.0, "resistance": 0.0, "support2": 0.0, "resistance2": 0.0}
+    lows = [float(c["low"]) for c in recent]
+    highs = [float(c["high"]) for c in recent]
+    close = float(recent[-1]["close"])
+    supports = sorted([v for v in lows if v <= close], reverse=True)
+    resistances = sorted([v for v in highs if v >= close])
+    support = supports[0] if supports else min(lows)
+    resistance = resistances[0] if resistances else max(highs)
+    support2 = supports[min(len(supports) - 1, max(0, len(supports) // 5))] if supports else min(lows)
+    resistance2 = resistances[min(len(resistances) - 1, max(0, len(resistances) // 5))] if resistances else max(highs)
+    return {"support": support, "resistance": resistance, "support2": support2, "resistance2": resistance2}
+
+
+def timeframe_snapshot(name: str, interval: str, candles: Optional[list[dict[str, float]]], weight: float) -> dict[str, Any]:
+    if not candles or len(candles) < 20:
+        return {"name": name, "interval": interval, "weight": weight, "ok": False, "score": 0.0, "text": f"{name}: нет данных"}
+    closes = [float(c["close"]) for c in candles]
+    highs = [float(c["high"]) for c in candles]
+    lows = [float(c["low"]) for c in candles]
+    volumes = [float(c.get("volume") or 0) for c in candles]
+    close = closes[-1]
+    change = pct_change(closes[0], close)
+    high = max(highs)
+    low = min(lows)
+    position = ((close - low) / (high - low) * 100.0) if high > low else 50.0
+    ema21 = ema(closes, 21)
+    ema50 = ema(closes, 50) if len(closes) >= 50 else ema(closes, 21)
+    rsis = calculate_rsi(closes, 14)
+    atrs = calculate_atr(highs, lows, closes, 14)
+    _, _, hist = macd_values(closes)
+    rsi_now = rsis[-1] if rsis and rsis[-1] is not None else 50.0
+    atr_now = atrs[-1] if atrs and atrs[-1] is not None else 0.0
+    atr_pct = atr_now / close * 100.0 if close > 0 else 0.0
+    avg_volume = sum(volumes[-21:-1]) / max(1, len(volumes[-21:-1])) if len(volumes) >= 21 else sum(volumes) / max(1, len(volumes))
+    volume_ratio = volumes[-1] / avg_volume if avg_volume > 0 else 1.0
+    slope = simple_linear_slope_pct(closes[-min(len(closes), 80):])
+    levels = nearest_levels(candles, 120)
+    support = float(levels["support"])
+    resistance = float(levels["resistance"])
+    dist_support = (close - support) / close * 100.0 if close > 0 and support > 0 else 0.0
+    dist_resistance = (resistance - close) / close * 100.0 if close > 0 and resistance > 0 else 0.0
+
+    score = 0.0
+    reasons: list[str] = []
+    if close > ema21[-1] > ema50[-1]:
+        score += 25
+        reasons.append("EMA↑")
+    elif close < ema21[-1] < ema50[-1]:
+        score -= 25
+        reasons.append("EMA↓")
+    elif close > ema21[-1]:
+        score += 8
+        reasons.append("цена>EMA21")
+    elif close < ema21[-1]:
+        score -= 8
+        reasons.append("цена<EMA21")
+
+    if rsi_now >= 58:
+        score += 10
+        reasons.append(f"RSI {rsi_now:.0f} бычий")
+    elif rsi_now <= 42:
+        score -= 10
+        reasons.append(f"RSI {rsi_now:.0f} медвежий")
+    elif 49 <= rsi_now <= 56:
+        score += 3
+    elif 44 <= rsi_now <= 51:
+        score -= 3
+    if rsi_now >= 74:
+        score -= 5
+        reasons.append("перегрев")
+    if rsi_now <= 26:
+        score += 5
+        reasons.append("перепроданность")
+
+    if hist and len(hist) >= 3:
+        if hist[-1] > 0 and hist[-1] >= hist[-2]:
+            score += 9
+            reasons.append("MACD↑")
+        elif hist[-1] < 0 and hist[-1] <= hist[-2]:
+            score -= 9
+            reasons.append("MACD↓")
+
+    score += clamp_float(change / 2.0, -12, 12)
+    score += clamp_float(slope * 2.0, -16, 16)
+    if volume_ratio >= 1.15:
+        last_ret = pct_change(float(candles[-1]["open"]), close)
+        if last_ret > 0:
+            score += min(8, (volume_ratio - 1.0) * 8)
+            reasons.append(f"объём x{volume_ratio:.2f} вверх")
+        elif last_ret < 0:
+            score -= min(8, (volume_ratio - 1.0) * 8)
+            reasons.append(f"объём x{volume_ratio:.2f} вниз")
+    if dist_support <= max(0.25, atr_pct * 0.8):
+        score += 8
+        reasons.append("рядом поддержка")
+    if dist_resistance <= max(0.25, atr_pct * 0.8):
+        score -= 8
+        reasons.append("рядом сопротивление")
+
+    score = clamp_float(score, -100, 100)
+    direction = "LONG" if score > 8 else "SHORT" if score < -8 else "FLAT"
+    return {
+        "name": name,
+        "interval": interval,
+        "weight": weight,
+        "ok": True,
+        "score": score,
+        "direction": direction,
+        "close": close,
+        "change_pct": change,
+        "range_pct": pct_change(low, high),
+        "position_pct": position,
+        "rsi": float(rsi_now),
+        "atr_pct": atr_pct,
+        "volume_ratio": volume_ratio,
+        "slope_pct": slope,
+        "support": support,
+        "resistance": resistance,
+        "support2": float(levels["support2"]),
+        "resistance2": float(levels["resistance2"]),
+        "dist_support_pct": dist_support,
+        "dist_resistance_pct": dist_resistance,
+        "reasons": reasons[:4],
+    }
+
+
+def snapshot_line(snap: dict[str, Any]) -> str:
+    if not snap.get("ok"):
+        return f"• {html.escape(str(snap.get('name')))}: нет данных"
+    side = str(snap.get("direction", "FLAT"))
+    emoji = "🟢" if side == "LONG" else "🔴" if side == "SHORT" else "⚪️"
+    reasons = ", ".join(str(x) for x in snap.get("reasons", [])[:3]) or "нейтрально"
+    return (
+        f"• {emoji} <b>{html.escape(str(snap['name']))}</b>: {html.escape(side)} "
+        f"score {float(snap['score']):+.1f}; изм. {float(snap['change_pct']):+.2f}%; "
+        f"наклон {float(snap['slope_pct']):+.2f}%; RSI {float(snap['rsi']):.1f}; "
+        f"объём x{float(snap['volume_ratio']):.2f}; позиция в диапазоне {float(snap['position_pct']):.0f}% — {html.escape(reasons)}"
+    )
+
+
+def analyze_sessions(candles_1h: Optional[list[dict[str, float]]]) -> dict[str, Any]:
+    if not candles_1h or len(candles_1h) < 72:
+        return {"score": 0.0, "text": "недостаточно 1h истории для анализа открытия Азии/Америки"}
+    buckets: dict[str, list[float]] = {"asia": [], "america": []}
+    for c in candles_1h[-720:]:
+        ts = float(c.get("open_time") or 0) / 1000.0
+        hour = time.gmtime(ts).tm_hour
+        ret = candle_return_pct(c)
+        if 0 <= hour <= 2:
+            buckets["asia"].append(ret)
+        if 13 <= hour <= 15:
+            buckets["america"].append(ret)
+    def avg(values: list[float]) -> float:
+        return sum(values) / len(values) if values else 0.0
+    asia_avg = avg(buckets["asia"])
+    america_avg = avg(buckets["america"])
+    asia_long = sum(1 for v in buckets["asia"] if v > 0) / len(buckets["asia"]) * 100 if buckets["asia"] else 50.0
+    america_long = sum(1 for v in buckets["america"] if v > 0) / len(buckets["america"]) * 100 if buckets["america"] else 50.0
+    now_hour = time.gmtime(time.time()).tm_hour
+    active = "Азия" if 0 <= now_hour <= 2 else "Америка" if 13 <= now_hour <= 15 else "вне открытия Азии/Америки"
+    active_score = 0.0
+    if 0 <= now_hour <= 2:
+        active_score = clamp_float(asia_avg * 10.0, -8, 8)
+    elif 13 <= now_hour <= 15:
+        active_score = clamp_float(america_avg * 10.0, -8, 8)
+    text = (
+        f"Азия open UTC 00-03: средний ход {asia_avg:+.3f}%, рост в {asia_long:.0f}% случаев; "
+        f"Америка open UTC 13-16: средний ход {america_avg:+.3f}%, рост в {america_long:.0f}% случаев; "
+        f"сейчас: {active}."
+    )
+    return {"score": active_score, "text": text, "asia_avg": asia_avg, "america_avg": america_avg}
+
+
+def feature_vector(candles: list[dict[str, float]], idx: int) -> Optional[list[float]]:
+    if idx < 60 or idx >= len(candles):
+        return None
+    closes = [float(c["close"]) for c in candles[:idx + 1]]
+    highs = [float(c["high"]) for c in candles[:idx + 1]]
+    lows = [float(c["low"]) for c in candles[:idx + 1]]
+    vols = [float(c.get("volume") or 0) for c in candles[:idx + 1]]
+    close = closes[-1]
+    if close <= 0:
+        return None
+    rsis = calculate_rsi(closes, 14)
+    rsi_now = rsis[-1] if rsis and rsis[-1] is not None else 50.0
+    ema21 = ema(closes, 21)[-1]
+    ema50 = ema(closes, 50)[-1]
+    avg_vol = sum(vols[-21:-1]) / 20 if len(vols) >= 21 else sum(vols) / max(1, len(vols))
+    vol_ratio = vols[-1] / avg_vol if avg_vol > 0 else 1.0
+    return [
+        pct_change(closes[-2], closes[-1]) if len(closes) >= 2 else 0.0,
+        pct_change(closes[-7], closes[-1]) if len(closes) >= 7 else 0.0,
+        pct_change(closes[-25], closes[-1]) if len(closes) >= 25 else 0.0,
+        (close - ema21) / close * 100.0,
+        (ema21 - ema50) / close * 100.0,
+        (float(rsi_now) - 50.0) / 10.0,
+        min(3.0, max(0.0, vol_ratio)) - 1.0,
+    ]
+
+
+def euclidean_distance(a: list[float], b: list[float]) -> float:
+    return math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b)))
+
+
+def similar_pattern_stats(candles: Optional[list[dict[str, float]]], horizon: int, label: str) -> dict[str, Any]:
+    if not candles or len(candles) < max(120, horizon + 80):
+        return {"ok": False, "score": 0.0, "text": f"{label}: мало истории для поиска похожих паттернов"}
+    current = feature_vector(candles, len(candles) - 1)
+    if current is None:
+        return {"ok": False, "score": 0.0, "text": f"{label}: не удалось построить текущий паттерн"}
+    matches: list[tuple[float, float]] = []
+    closes = [float(c["close"]) for c in candles]
+    for idx in range(70, len(candles) - horizon - 1):
+        fv = feature_vector(candles, idx)
+        if fv is None:
+            continue
+        dist = euclidean_distance(current, fv)
+        forward = pct_change(closes[idx], closes[idx + horizon])
+        matches.append((dist, forward))
+    if len(matches) < 10:
+        return {"ok": False, "score": 0.0, "text": f"{label}: найдено мало похожих случаев"}
+    matches.sort(key=lambda x: x[0])
+    top = matches[:min(30, len(matches))]
+    forwards = [x[1] for x in top]
+    avg_forward = sum(forwards) / len(forwards)
+    long_win = sum(1 for v in forwards if v > 0) / len(forwards) * 100.0
+    short_win = sum(1 for v in forwards if v < 0) / len(forwards) * 100.0
+    score = clamp_float(avg_forward * 14.0 + (long_win - short_win) * 0.20, -18, 18)
+    best_side = "LONG" if avg_forward > 0 else "SHORT" if avg_forward < 0 else "FLAT"
+    return {
+        "ok": True,
+        "score": score,
+        "avg_forward": avg_forward,
+        "long_win": long_win,
+        "short_win": short_win,
+        "side": best_side,
+        "text": (
+            f"{label}: найдено {len(top)} похожих паттернов; средний следующий ход {avg_forward:+.2f}%, "
+            f"LONG отработал {long_win:.0f}%, SHORT отработал {short_win:.0f}%"
+        ),
+    }
+
+
+async def fetch_eth_news_background(session: aiohttp.ClientSession) -> dict[str, Any]:
+    if not ETH_PROFIT_NEWS_ENABLED or not CRYPTOPANIC_TOKEN:
+        return {"score": 0.0, "text": "новостной фон не подключён: нет CRYPTOPANIC_TOKEN, фактор нейтральный"}
+    url = "https://cryptopanic.com/api/developer/v2/posts/"
+    params = {"auth_token": CRYPTOPANIC_TOKEN, "currencies": "ETH", "public": "true"}
+    try:
+        async with session.get(url, params=params, timeout=10) as response:
+            if response.status != 200:
+                return {"score": 0.0, "text": f"новости недоступны HTTP {response.status}, фактор нейтральный"}
+            raw = await response.json()
+    except Exception:
+        logging.exception("ETH Profit news fetch failed")
+        return {"score": 0.0, "text": "новости не получены, фактор нейтральный"}
+    posts = raw.get("results") or []
+    positive_words = {"bull", "bullish", "surge", "rally", "etf", "inflow", "upgrade", "growth", "record", "accumulate", "approval"}
+    negative_words = {"bear", "bearish", "hack", "outflow", "selloff", "lawsuit", "ban", "crash", "dump", "liquidation", "exploit"}
+    pos = neg = 0
+    titles = []
+    for post in posts[:20]:
+        title = str(post.get("title") or "")
+        low = title.lower()
+        if any(w in low for w in positive_words):
+            pos += 1
+        if any(w in low for w in negative_words):
+            neg += 1
+        if title and len(titles) < 3:
+            titles.append(title[:90])
+    score = clamp_float((pos - neg) * 2.5, -8, 8)
+    text = f"новости ETH: позитив {pos}, негатив {neg}; " + ("; ".join(titles) if titles else "заголовков мало")
+    return {"score": score, "text": text}
+
+
+def eth_trade_plan(entry: float, side: str, candles_15m: list[dict[str, float]], candles_1h: list[dict[str, float]], probability: float, funding_rate_pct: Optional[float]) -> dict[str, Any]:
+    highs = [float(c["high"]) for c in candles_15m[-120:]]
+    lows = [float(c["low"]) for c in candles_15m[-120:]]
+    closes = [float(c["close"]) for c in candles_15m[-120:]]
+    atrs = calculate_atr(highs, lows, closes, 14)
+    atr = atrs[-1] if atrs and atrs[-1] is not None else max(entry * 0.006, 1e-9)
+    levels_15 = nearest_levels(candles_15m, 120)
+    levels_1h = nearest_levels(candles_1h, 160)
+    support = max(float(levels_15["support"]), float(levels_1h["support"]))
+    resistance = min(float(levels_15["resistance"]), float(levels_1h["resistance"]))
+    min_risk = max(entry * 0.004, atr * 0.9)
+    if side == "LONG":
+        ideal_entry = max(support, entry - atr * 0.35)
+        stop = min(ideal_entry - min_risk, support - atr * 0.35)
+        if stop <= 0:
+            stop = ideal_entry * 0.99
+        risk = max(ideal_entry - stop, entry * 0.004)
+        tps = [ideal_entry + risk * 1.5, ideal_entry + risk * 2.5, ideal_entry + risk * 3.5]
+        if resistance > ideal_entry:
+            tps[0] = max(tps[0], min(resistance, ideal_entry + risk * 2.0))
+    else:
+        ideal_entry = min(resistance, entry + atr * 0.35) if resistance > 0 else entry + atr * 0.35
+        stop = max(ideal_entry + min_risk, resistance + atr * 0.35)
+        risk = max(stop - ideal_entry, entry * 0.004)
+        tps = [max(ideal_entry - risk * 1.5, entry * 0.0001), max(ideal_entry - risk * 2.5, entry * 0.0001), max(ideal_entry - risk * 3.5, entry * 0.0001)]
+        if support > 0 and support < ideal_entry:
+            tps[0] = min(tps[0], max(support, ideal_entry - risk * 2.0))
+    market_rr = risk_reward(entry, stop, tps[0], side)
+    ideal_rr = risk_reward(ideal_entry, stop, tps[0], side)
+    stop_pct = abs((ideal_entry - stop) / ideal_entry * 100.0) if ideal_entry > 0 else 0.0
+    equity = max(1.0, float(ACCOUNT_EQUITY_USDT))
+    risk_pct = ETH_PROFIT_RISK_PERCENT if probability >= ETH_PROFIT_STRONG_TRADE_PROBABILITY else min(0.35, ETH_PROFIT_RISK_PERCENT)
+    risk_pct = min(risk_pct, ETH_PROFIT_MAX_RISK_PERCENT)
+    risk_usdt = equity * risk_pct / 100.0
+    notional = risk_usdt / max(stop_pct / 100.0, 0.001)
+    if probability < ETH_PROFIT_MIN_TRADE_PROBABILITY:
+        leverage = 1
+        recommended_margin = 0.0
+    elif probability >= 85:
+        leverage = min(ETH_PROFIT_MAX_LEVERAGE, 3)
+        recommended_margin = notional / leverage
+    elif probability >= 75:
+        leverage = min(ETH_PROFIT_MAX_LEVERAGE, 2)
+        recommended_margin = notional / leverage
+    else:
+        leverage = 1
+        recommended_margin = notional
+    recommended_margin = max(0.0, min(recommended_margin, equity * 0.20))
+    round_cost = estimate_roundtrip_cost_pct(None, funding_rate_pct)
+    return {
+        "entry_market": entry,
+        "entry_ideal": ideal_entry,
+        "stop": stop,
+        "tps": tps,
+        "market_rr": market_rr or 0.0,
+        "ideal_rr": ideal_rr or 0.0,
+        "stop_pct": stop_pct,
+        "risk_pct": risk_pct,
+        "risk_usdt": risk_usdt,
+        "notional": notional,
+        "leverage": leverage,
+        "recommended_margin": recommended_margin,
+        "roundtrip_cost_pct": round_cost.get("total_pct", 0.0),
+    }
+
+
+def build_eth_profit_text(data: dict[str, Any]) -> str:
+    snapshots: list[dict[str, Any]] = data["snapshots"]
+    current_price = float(data["current_price"])
+    long_probability = float(data["long_probability"])
+    short_probability = 100.0 - long_probability
+    side = str(data["side"])
+    plan = data["plan"]
+    funding_text = data["funding_text"]
+    news = data["news"]
+    session = data["session"]
+    pattern_15 = data["pattern_15m"]
+    pattern_1h = data["pattern_1h"]
+    primary_4h = data["primary_4h"]
+    primary_1d = data["primary_1d"]
+    support = data["support"]
+    resistance = data["resistance"]
+    mode = "✅ вход можно рассматривать" if max(long_probability, short_probability) >= ETH_PROFIT_MIN_TRADE_PROBABILITY else "⏳ лучше ждать, перевес слабый"
+    market_allowed = plan.get("market_rr", 0.0) >= 1.2 and max(long_probability, short_probability) >= ETH_PROFIT_STRONG_TRADE_PROBABILITY
+    market_text = "допустим малым объёмом" if market_allowed else "лучше ждать идеальную точку/откат"
+    lines = [
+        "<b>💎 ETH PROFIT — глубокий анализ ETH</b>",
+        f"Версия бота: <b>{html.escape(BOT_VERSION)}</b>",
+        f"Биржа: <b>{html.escape(exchange_label())}</b>",
+        f"Текущая цена ETH: <b>{html.escape(fmt_price(current_price))}</b>",
+        "",
+        "<b>Итог после всех факторов</b>",
+        f"Рекомендация: <b>{html.escape(side)}</b> — {mode}",
+        f"Вероятность LONG: <b>{long_probability:.0f}%</b>",
+        f"Вероятность SHORT: <b>{short_probability:.0f}%</b>",
+        f"Вход по рынку: <b>{market_text}</b>",
+        "",
+        "<b>План сделки</b>",
+        f"Рекомендуемая точка LONG: <b>{html.escape(fmt_price(data['long_entry']))}</b>",
+        f"Рекомендуемая точка SHORT: <b>{html.escape(fmt_price(data['short_entry']))}</b>",
+        f"Выбранный вход: <b>{html.escape(fmt_price(plan['entry_ideal']))}</b>",
+        f"Вход по рынку: <b>{html.escape(fmt_price(plan['entry_market']))}</b>",
+        f"Стоп: <b>{html.escape(fmt_price(plan['stop']))}</b> ({plan['stop_pct']:.2f}% риска от идеального входа)",
+        f"TP1: <b>{html.escape(fmt_price(plan['tps'][0]))}</b> · TP2: <b>{html.escape(fmt_price(plan['tps'][1]))}</b> · TP3: <b>{html.escape(fmt_price(plan['tps'][2]))}</b>",
+        f"RR от идеального входа до TP1: <b>{plan['ideal_rr']:.2f}</b>; RR по рынку до TP1: <b>{plan['market_rr']:.2f}</b>",
+        f"Оценка расходов круг: <b>{plan['roundtrip_cost_pct']:.3f}%</b> (комиссия+slippage+funding reserve)",
+        "",
+        "<b>Сумма и плечо</b>",
+        f"Расчётный депозит: <b>${ACCOUNT_EQUITY_USDT:g}</b>",
+        f"Риск на сделку: <b>{plan['risk_pct']:.2f}%</b> ≈ <b>${plan['risk_usdt']:.2f}</b>",
+        f"Рекомендованная маржа: <b>${plan['recommended_margin']:.2f}</b>",
+        f"Плечо: <b>x{plan['leverage']}</b>",
+        "",
+        "<b>Таймфреймы</b>",
+    ]
+    lines.extend(snapshot_line(snap) for snap in snapshots)
+    lines.extend([
+        "",
+        "<b>История похожих паттернов</b>",
+        f"• {html.escape(pattern_15['text'])}",
+        f"• {html.escape(pattern_1h['text'])}",
+        "",
+        "<b>Сессии открытия</b>",
+        f"• {html.escape(session['text'])}",
+        "",
+        "<b>Тренд, уровни, объём, funding, новости</b>",
+        f"• 4h тренд: <b>{html.escape(trend_direction_label(primary_4h.direction if primary_4h else 'UNKNOWN'))}</b> score {primary_4h.score if primary_4h else 0:+d}",
+        f"• 1d тренд: <b>{html.escape(trend_direction_label(primary_1d.direction if primary_1d else 'UNKNOWN'))}</b> score {primary_1d.score if primary_1d else 0:+d}",
+        f"• Поддержка: <b>{html.escape(fmt_price(support))}</b> ({pct_from_entry(support, current_price):+.2f}% от цены)",
+        f"• Сопротивление: <b>{html.escape(fmt_price(resistance))}</b> ({pct_from_entry(resistance, current_price):+.2f}% от цены)",
+        f"• Funding: {html.escape(funding_text)}",
+        f"• Новостной фон: {html.escape(news['text'])}",
+        "",
+        "<b>Прогноз цены по всем ТФ</b>",
+        f"• Ближайший сценарий: <b>{html.escape(data['forecast_text'])}</b>",
+        f"• Ожидаемая зона при отработке: <b>{html.escape(fmt_price(data['forecast_low']))}</b> — <b>{html.escape(fmt_price(data['forecast_high']))}</b>",
+        "",
+        "⚠️ Не финсовет. Даже глубокий анализ не гарантирует прибыль: используй малый риск и не увеличивай плечо после убытка.",
+    ])
+    return "\n".join(lines)
+
+
+
+
+async def fetch_eth_profit_funding_rate_pct(exchange_name: str, symbol: str) -> Optional[float]:
+    exchange = None
+    try:
+        exchange = create_ccxt_exchange(exchange_name)
+        market_symbol = await find_ccxt_market_symbol(exchange, symbol)
+        if not getattr(exchange, "has", {}).get("fetchFundingRate"):
+            return None
+        funding = await exchange.fetch_funding_rate(market_symbol)
+        if isinstance(funding, dict):
+            for key in ("fundingRate", "rate"):
+                value = funding.get(key)
+                if value is not None:
+                    return float(value) * 100.0
+    except Exception:
+        logging.debug("ETH Profit funding unavailable", exc_info=True)
+    finally:
+        if exchange is not None:
+            try:
+                await exchange.close()
+            except Exception:
+                pass
+    return None
+
+async def build_eth_profit_analysis() -> str:
+    symbol = ETH_PROFIT_SYMBOL
+    timeout = aiohttp.ClientTimeout(total=45)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        tasks = {
+            "year": fetch_klines(session, symbol, "1d", 370),
+            "month": fetch_klines(session, symbol, "1d", 35),
+            "week": fetch_klines(session, symbol, "4h", 60),
+            "day": fetch_klines(session, symbol, "1h", 48),
+            "4h": fetch_klines(session, symbol, "4h", 300),
+            "1h": fetch_klines(session, symbol, "1h", 900),
+            "15m": fetch_klines(session, symbol, "15m", 1200),
+            "5m": fetch_klines(session, symbol, "5m", 500),
+        }
+        results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+        candles_map: dict[str, Optional[list[dict[str, float]]]] = {}
+        for key, result in zip(tasks.keys(), results):
+            candles_map[key] = None if isinstance(result, Exception) else result
+        # На некоторых биржах kline endpoint не отдаёт меньше ~80 свечей.
+        # Поэтому короткие периоды собираем из более длинной истории, если прямой запрос пустой.
+        if candles_map.get("year"):
+            candles_map["month"] = (candles_map.get("month") or candles_map["year"][-35:])
+        if candles_map.get("4h"):
+            candles_map["week"] = (candles_map.get("week") or candles_map["4h"][-60:])
+        if candles_map.get("1h"):
+            candles_map["day"] = (candles_map.get("day") or candles_map["1h"][-48:])
+        funding_rate_pct = await fetch_eth_profit_funding_rate_pct(MARKET_DATA_PROVIDER, symbol)
+        news = await fetch_eth_news_background(session)
+
+    candles_15m = candles_map.get("15m") or candles_map.get("1h") or []
+    candles_1h = candles_map.get("1h") or candles_map.get("4h") or candles_15m
+    candles_4h = candles_map.get("4h") or candles_1h
+    candles_1d = candles_map.get("year") or candles_map.get("month") or candles_4h
+    if not candles_15m or len(candles_15m) < 80:
+        raise RuntimeError("не получил достаточно свечей ETH для ETH Profit анализа")
+    current_price = float(candles_15m[-1]["close"])
+    snapshots = [
+        timeframe_snapshot("Годовой", "1d/365", candles_map.get("year"), 1.0),
+        timeframe_snapshot("Месячный", "1d/30", candles_map.get("month"), 1.1),
+        timeframe_snapshot("Недельный", "4h/7d", candles_map.get("week"), 1.2),
+        timeframe_snapshot("Дневной", "1h/24h", candles_map.get("day"), 1.3),
+        timeframe_snapshot("4 часа", "4h", candles_map.get("4h"), 1.8),
+        timeframe_snapshot("1 час", "1h", candles_map.get("1h"), 1.7),
+        timeframe_snapshot("15 минут", "15m", candles_map.get("15m"), 1.5),
+        timeframe_snapshot("5 минут", "5m", candles_map.get("5m"), 0.9),
+    ]
+    weighted = sum(float(s["score"]) * float(s["weight"]) for s in snapshots if s.get("ok"))
+    weight_sum = sum(float(s["weight"]) for s in snapshots if s.get("ok")) or 1.0
+    base_score = weighted / weight_sum
+    session = analyze_sessions(candles_1h)
+    pattern_15 = similar_pattern_stats(candles_map.get("15m"), 16, "15m горизонт ~4ч")
+    pattern_1h = similar_pattern_stats(candles_map.get("1h"), 12, "1h горизонт ~12ч")
+    primary_4h = analyze_primary_trend(candles_4h, "4h") if candles_4h else None
+    primary_1d = analyze_primary_trend(candles_1d, "1d") if candles_1d else None
+    trend_score = 0.0
+    for tr, weight in ((primary_4h, 1.4), (primary_1d, 1.0)):
+        if tr:
+            trend_score += clamp_float(float(tr.score) * weight * 2.0, -12, 12)
+    funding_score = 0.0
+    if funding_rate_pct is None:
+        funding_text = "не получен, фактор нейтральный"
+    else:
+        # Положительный funding = longs pay shorts, это маленький контр-вес LONG.
+        funding_score = clamp_float(-float(funding_rate_pct) * 80.0, -6, 6)
+        funding_text = f"{funding_rate_pct:+.4f}% — {'давит на LONG' if funding_rate_pct > 0 else 'давит на SHORT' if funding_rate_pct < 0 else 'нейтрально'}"
+    total_score = base_score + float(session.get("score") or 0.0) + float(pattern_15.get("score") or 0.0) + float(pattern_1h.get("score") or 0.0) + trend_score + funding_score + float(news.get("score") or 0.0)
+    total_score = clamp_float(total_score, -90, 90)
+    long_probability = clamp_float(50.0 + total_score * 0.45, 5, 95)
+    side = "LONG" if long_probability >= 50 else "SHORT"
+    probability = max(long_probability, 100.0 - long_probability)
+    levels_15 = nearest_levels(candles_15m, 160)
+    levels_1h = nearest_levels(candles_1h, 160)
+    support = max(float(levels_15["support"]), float(levels_1h["support"]))
+    resistance = min(float(levels_15["resistance"]), float(levels_1h["resistance"]))
+    if resistance <= current_price:
+        resistance = max(float(levels_15["resistance"]), float(levels_1h["resistance"]), current_price * 1.006)
+    if support >= current_price:
+        support = min(float(levels_15["support"]), float(levels_1h["support"]), current_price * 0.994)
+    long_entry = max(support, current_price * 0.997)
+    short_entry = min(resistance, current_price * 1.003)
+    plan = eth_trade_plan(current_price, side, candles_15m, candles_1h, probability, funding_rate_pct)
+    expected_move = (float(pattern_15.get("avg_forward") or 0.0) + float(pattern_1h.get("avg_forward") or 0.0)) / 2.0
+    if expected_move == 0:
+        expected_move = total_score / 120.0
+    forecast_mid = current_price * (1.0 + expected_move / 100.0)
+    forecast_span = max(current_price * 0.003, abs(forecast_mid - current_price) * 0.8)
+    forecast_low = forecast_mid - forecast_span
+    forecast_high = forecast_mid + forecast_span
+    forecast_text = "рост/лонг-преимущество" if total_score > 8 else "снижение/шорт-преимущество" if total_score < -8 else "флэт, вход только от уровня"
+    data = {
+        "snapshots": snapshots,
+        "current_price": current_price,
+        "long_probability": long_probability,
+        "side": side,
+        "plan": plan,
+        "funding_text": funding_text,
+        "news": news,
+        "session": session,
+        "pattern_15m": pattern_15,
+        "pattern_1h": pattern_1h,
+        "primary_4h": primary_4h,
+        "primary_1d": primary_1d,
+        "support": support,
+        "resistance": resistance,
+        "long_entry": long_entry,
+        "short_entry": short_entry,
+        "forecast_text": forecast_text,
+        "forecast_low": forecast_low,
+        "forecast_high": forecast_high,
+    }
+    return build_eth_profit_text(data)
+
+
+def split_telegram_text(text: str, limit: int = 3900) -> list[str]:
+    if len(text) <= limit:
+        return [text]
+    parts: list[str] = []
+    current = ""
+    for line in text.split("\n"):
+        if len(current) + len(line) + 1 > limit:
+            parts.append(current)
+            current = line
+        else:
+            current = f"{current}\n{line}" if current else line
+    if current:
+        parts.append(current)
+    return parts
+
+
+async def answer_eth_profit_analysis(message: Message) -> None:
+    if not ETH_PROFIT_MODE_ENABLED:
+        await message.answer(
+            "💎 ETH Profit сейчас выключен. Включи его в /settings → 💎 ETH Profit или командой /eth_profit, затем напиши <code>eth profit</code>.",
+            reply_markup=keyboard,
+        )
+        return
+    progress = await message.answer("🔎 ETH Profit: собираю 1y/1M/1W/1D/4h/1h/15m/5m, историю паттернов, сессии, объёмы, funding и новости...")
+    try:
+        text = await build_eth_profit_analysis()
+    except asyncio.TimeoutError:
+        logging.exception("ETH Profit timeout")
+        await safe_edit(progress, "⏳ ETH Profit: биржа долго отвечает. Попробуй ещё раз.")
+        return
+    except Exception as exc:
+        logging.exception("ETH Profit analysis failed")
+        await safe_edit(progress, "⚠️ ETH Profit: ошибка анализа. Подробности в Railway Logs.")
+        await message.answer(f"Ошибка: <code>{html.escape(str(exc))}</code>")
+        return
+    await safe_edit(progress, "✅ ETH Profit анализ готов")
+    parts = split_telegram_text(text)
+    for index, part in enumerate(parts):
+        await message.answer(part, reply_markup=keyboard if index == len(parts) - 1 else None)
+        await asyncio.sleep(0.05)
+
+
 # ---------- Telegram handlers ----------
 
 dp = Dispatcher()
@@ -5950,7 +6657,7 @@ async def cmd_start(message: Message) -> None:
         "Привет! Я Telegram-бот для автоматических торговых сигналов.\n\n"
         "Ты подписан на сигналы. Бот сам сканирует рынок и отправляет сетапы "
         f"с проходимостью от {MIN_SIGNAL_PROBABILITY}% и выше.\n\n"
-        "Команды: /help, /status, /settings, /scan, /ping, /super_deal, /btc_eth, /naklonki, /improvements, /polishing, /journal, /id, /stop",
+        "Команды: /help, /status, /settings, /scan, /ping, /super_deal, /btc_eth, /naklonki, /improvements, /polishing, /eth_profit, /journal, /id, /stop",
         reply_markup=keyboard,
     )
 
@@ -6049,6 +6756,7 @@ async def cmd_status(message: Message) -> None:
         f"Наклонки: <b>{html.escape(slope_levels_label())}</b>\n"
         f"Улучшения торговли: <b>{html.escape(trading_improvements_label())}</b>\n"
         f"Полировка торговли: <b>{html.escape(trade_polishing_label())}</b>\n"
+        f"ETH Profit: <b>{html.escape(eth_profit_label())}</b>\n"
         f"Автоторговля: <b>{html.escape(autotrade_label())}</b>\n"
         f"API текущей биржи: <b>{'есть' if has_api_keys(MARKET_DATA_PROVIDER) else 'нет'}</b>\n"
         f"Маржа/объём сделки: <b>${TRADE_MARGIN_USDT:g}</b>\n"
@@ -6245,6 +6953,19 @@ async def cmd_polishing(message: Message) -> None:
         await message.answer("Настройка доступна только админу.")
         return
     await message.answer(trade_polishing_stats_text(), reply_markup=trade_polishing_keyboard())
+
+
+@dp.message(Command("eth_profit"))
+async def cmd_eth_profit(message: Message) -> None:
+    global ETH_PROFIT_MODE_ENABLED
+    if not is_admin(message.from_user.id):
+        await message.answer("ETH Profit доступен только админу.")
+        return
+    parts = (message.text or "").split()
+    if len(parts) > 1 and parts[1].lower() in {"on", "off", "вкл", "выкл"}:
+        ETH_PROFIT_MODE_ENABLED = parts[1].lower() in {"on", "вкл"}
+        save_runtime_settings()
+    await message.answer(eth_profit_status_text(), reply_markup=eth_profit_keyboard())
 
 
 @dp.message(Command("journal"))
@@ -6481,6 +7202,7 @@ async def settings_callback(callback: CallbackQuery) -> None:
     global AUTO_SIGNALS_ENABLED, SIGNAL_TIMEFRAME, MIN_SIGNAL_PROBABILITY, SCAN_INTERVAL_SECONDS, SIGNAL_COOLDOWN_MINUTES, MAX_SIGNALS_PER_SCAN, MARKET_DATA_PROVIDER
     global AUTO_TRADE_MODE, TRADE_MARGIN_USDT, AUTO_CLOSE_TP_INDEX, SMART_ALGORITHM_ENABLED
     global NEURAL_OPTIMIZER_ENABLED, SUPER_DEAL_ENABLED, BTC_ETH_ONLY_MODE_ENABLED, SLOPE_LEVELS_ENABLED, SLOPE_LEVELS_MODE, TRADING_IMPROVEMENTS_ENABLED, TRADE_POLISHING_ENABLED
+    global ETH_PROFIT_MODE_ENABLED
     global TREND_FILTER_ENABLED, TREND_TIMEFRAME
 
     if callback.from_user is None or not is_admin(callback.from_user.id):
@@ -6677,6 +7399,17 @@ async def settings_callback(callback: CallbackQuery) -> None:
     if data == "settings:polishing":
         await message.edit_text(trade_polishing_stats_text(), reply_markup=trade_polishing_keyboard())
         await callback.answer()
+        return
+
+    if data == "settings:eth_profit":
+        await message.edit_text(eth_profit_status_text(), reply_markup=eth_profit_keyboard())
+        await callback.answer()
+        return
+
+    if data == "settings:run_eth_profit":
+        await callback.answer("Запускаю ETH Profit")
+        await message.answer("🔎 Запускаю глубокий ETH Profit анализ...")
+        await answer_eth_profit_analysis(message)
         return
 
     if data == "settings:journal":
@@ -6955,6 +7688,17 @@ async def settings_callback(callback: CallbackQuery) -> None:
             await callback.answer("Неверное значение", show_alert=True)
         return
 
+    if data.startswith("settings:set_eth_profit:"):
+        value = data.split(":", 2)[2].lower()
+        if value in {"on", "off"}:
+            ETH_PROFIT_MODE_ENABLED = value == "on"
+            save_runtime_settings()
+            await message.edit_text(settings_menu_text(), reply_markup=settings_keyboard())
+            await callback.answer("ETH Profit включён: авто-скан и автоторговля на паузе" if ETH_PROFIT_MODE_ENABLED else "ETH Profit выключен: обычный режим")
+        else:
+            await callback.answer("Неверное значение", show_alert=True)
+        return
+
     if data.startswith("settings:set_autotrade_mode:"):
         value = data.split(":", 2)[2].lower()
         if value in AUTO_TRADE_MODE_OPTIONS:
@@ -7027,6 +7771,9 @@ async def cmd_scan(message: Message, bot: Bot) -> None:
     if not is_admin(message.from_user.id):
         await message.answer("Эта команда доступна только админу.")
         return
+    if eth_profit_blocks_trading():
+        await message.answer("💎 ETH Profit включён: авто-скан временно выключен. Напиши <code>eth profit</code> для глубокого анализа ETH или выключи режим в /eth_profit.")
+        return
     progress = await message.answer("🧪 Запускаю ручной авто-скан рынка...")
     try:
         scan, sent_candidates, skipped = await run_auto_scan_once(bot, ignore_cooldown=True, allow_trading=False)
@@ -7046,6 +7793,9 @@ async def cmd_scan(message: Message, bot: Bot) -> None:
 async def cmd_signal(message: Message, command: CommandObject, bot: Bot) -> None:
     if not is_admin(message.from_user.id):
         await message.answer("Эта команда доступна только админу.")
+        return
+    if eth_profit_blocks_trading():
+        await message.answer("💎 ETH Profit включён: ручная отправка обычных сигналов временно выключена. Напиши <code>eth profit</code> или выключи режим в /eth_profit.")
         return
     if not command.args:
         await message.answer("Пример:\n<code>/signal TRX LONG 82 0.3235 0.3195 0.3265 0.3290 0.3320 Лонг от поддержки</code>")
@@ -7192,6 +7942,11 @@ async def button_polishing(message: Message) -> None:
     await cmd_polishing(message)
 
 
+@dp.message(F.text == "💎 ETH Profit")
+async def button_eth_profit(message: Message) -> None:
+    await cmd_eth_profit(message)
+
+
 @dp.message(F.text == "💰 Автоторговля")
 async def button_autotrade(message: Message) -> None:
     if not is_admin(message.from_user.id):
@@ -7219,6 +7974,17 @@ async def button_stop(message: Message) -> None:
 @dp.message()
 async def fallback(message: Message) -> None:
     text = (message.text or "").strip()
+    normalized_text = text.lower().replace("_", " ").replace("-", " ")
+    if normalized_text in {"eth profit", "эфир profit", "ethprofit"}:
+        await answer_eth_profit_analysis(message)
+        return
+    if eth_profit_blocks_trading():
+        await message.answer(
+            "💎 ETH Profit включён: обычный ручной скан монет и авто-функции на паузе. "
+            "Напиши <code>eth profit</code> для полного анализа ETH или выключи режим в /eth_profit.",
+            reply_markup=keyboard,
+        )
+        return
     if text and is_symbol_query(text):
         await answer_single_symbol_scan(message, text)
         return
