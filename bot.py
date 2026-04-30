@@ -24,6 +24,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BOT_STARTED_AT = time.time()
+BOT_VERSION = "1022"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
@@ -198,6 +199,18 @@ MAX_WEEKLY_LOSS_PERCENT = 5.0
 MAX_CONSECUTIVE_LOSSES = 3
 PAUSE_AFTER_LOSS_STREAK_HOURS = 12
 STRICT_PROTECTION_CHECK_ENABLED = True
+
+# ---- Полировка торговли ----
+# Отдельный защитный режим для авто-входов. Когда ON, бот не открывает PAPER/LIVE
+# сделку, пока не пройдены: риск/прибыль после комиссий, spread, slippage, funding,
+# лимит риска на депозит, пауза после серии убытков и лимит открытых сделок.
+TRADE_POLISHING_ENABLED = False
+POLISH_MIN_NET_RR = 2.0
+POLISH_PREFERRED_NET_RR = 2.5
+POLISH_TAKER_FEE_PCT = 0.06          # оценка комиссии за одну сторону, % от позиции
+POLISH_SLIPPAGE_PCT = 0.05          # запас на проскальзывание за одну сторону, %
+POLISH_FUNDING_RESERVE_PCT = 0.03   # запас на funding, %
+POLISH_MAX_RISK_PER_TRADE_PERCENT = 1.0
 PARTIAL_TP_ENABLED = True
 TP1_CLOSE_PERCENT = 40
 TP2_CLOSE_PERCENT = 30
@@ -225,7 +238,7 @@ WALK_FORWARD_OPTIMIZER_ENABLED = True
 WALK_FORWARD_TRAIN_RATIO = 0.7
 WALK_FORWARD_MIN_TEST_TRADES = 2
 
-MAX_ACTIVE_TRADES = 1
+MAX_ACTIVE_TRADES = 3
 MAX_ACTIVE_TRADES = max(1, min(20, MAX_ACTIVE_TRADES))
 TRADE_MONITOR_INTERVAL_SECONDS = 20
 DATA_DIR = Path(
@@ -318,13 +331,14 @@ def save_runtime_settings() -> None:
         "SLOPE_LEVELS_ENABLED": SLOPE_LEVELS_ENABLED,
         "SLOPE_LEVELS_MODE": SLOPE_LEVELS_MODE,
         "TRADING_IMPROVEMENTS_ENABLED": TRADING_IMPROVEMENTS_ENABLED,
+        "TRADE_POLISHING_ENABLED": TRADE_POLISHING_ENABLED,
     })
 
 
 def apply_runtime_settings(settings: dict[str, Any]) -> None:
     global AUTO_SIGNALS_ENABLED, MIN_SIGNAL_PROBABILITY, SIGNAL_TIMEFRAME, SCAN_INTERVAL_SECONDS, SIGNAL_COOLDOWN_MINUTES, MAX_SIGNALS_PER_SCAN, MARKET_DATA_PROVIDER
     global AUTO_TRADE_MODE, TRADE_MARGIN_USDT, AUTO_CLOSE_TP_INDEX, SMART_ALGORITHM_ENABLED
-    global NEURAL_OPTIMIZER_ENABLED, SUPER_DEAL_ENABLED, BTC_ETH_ONLY_MODE_ENABLED, SLOPE_LEVELS_ENABLED, SLOPE_LEVELS_MODE, TRADING_IMPROVEMENTS_ENABLED
+    global NEURAL_OPTIMIZER_ENABLED, SUPER_DEAL_ENABLED, BTC_ETH_ONLY_MODE_ENABLED, SLOPE_LEVELS_ENABLED, SLOPE_LEVELS_MODE, TRADING_IMPROVEMENTS_ENABLED, TRADE_POLISHING_ENABLED
     global TREND_FILTER_ENABLED, TREND_TIMEFRAME
 
     auto_raw = settings.get("AUTO_SIGNALS_ENABLED", AUTO_SIGNALS_ENABLED)
@@ -433,6 +447,12 @@ def apply_runtime_settings(settings: dict[str, Any]) -> None:
         TRADING_IMPROVEMENTS_ENABLED = improvements_raw
     else:
         TRADING_IMPROVEMENTS_ENABLED = str(improvements_raw).strip().lower() in {"1", "true", "yes", "on"}
+
+    polishing_raw = settings.get("TRADE_POLISHING_ENABLED", TRADE_POLISHING_ENABLED)
+    if isinstance(polishing_raw, bool):
+        TRADE_POLISHING_ENABLED = polishing_raw
+    else:
+        TRADE_POLISHING_ENABLED = str(polishing_raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def human_interval(seconds: int) -> str:
@@ -551,6 +571,23 @@ def trading_improvements_label() -> str:
     return "OFF — прежний режим без дополнительных улучшений"
 
 
+def trade_polishing_active() -> bool:
+    return bool(TRADE_POLISHING_ENABLED)
+
+
+def trade_safety_controls_active() -> bool:
+    return bool(TRADING_IMPROVEMENTS_ENABLED or TRADE_POLISHING_ENABLED)
+
+
+def trade_polishing_label() -> str:
+    if TRADE_POLISHING_ENABLED:
+        return (
+            f"ON — net RR ≥{POLISH_MIN_NET_RR:g}, комиссии/spread/slippage/funding, "
+            f"риск ≤{POLISH_MAX_RISK_PER_TRADE_PERCENT:g}%"
+        )
+    return "OFF — без дополнительной полировки входа"
+
+
 def auto_signals_label() -> str:
     return "ON — авто-скан отправляет сигналы" if AUTO_SIGNALS_ENABLED else "OFF — авто-скан выключен"
 
@@ -574,6 +611,7 @@ def settings_menu_text() -> str:
         f"Только BTC/ETH: <b>{html.escape(btc_eth_only_label())}</b>\n"
         f"Наклонки: <b>{html.escape(slope_levels_label())}</b>\n"
         f"Улучшения торговли: <b>{html.escape(trading_improvements_label())}</b>\n"
+        f"Полировка торговли: <b>{html.escape(trade_polishing_label())}</b>\n"
         f"Автоторговля: <b>{html.escape(autotrade_label())}</b>\n"
         f"Маржа/объём сделки: <b>${TRADE_MARGIN_USDT:g}</b>\n"
         f"Авто-закрытие: <b>SL или TP{AUTO_CLOSE_TP_INDEX}</b>\n\n"
@@ -601,6 +639,7 @@ def settings_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="₿ Только BTC/ETH", callback_data="settings:btc_eth_only")],
         [InlineKeyboardButton(text="📐 Наклонки", callback_data="settings:slope_levels")],
         [InlineKeyboardButton(text="🚀 Улучшения торговли", callback_data="settings:improvements")],
+        [InlineKeyboardButton(text="✨ Полировка торговли", callback_data="settings:polishing")],
         [InlineKeyboardButton(text="💰 Автоторговля", callback_data="settings:autotrade")],
         [InlineKeyboardButton(text="🔑 API ключи", callback_data="settings:api")],
         [InlineKeyboardButton(text="❌ Закрыть", callback_data="settings:close")],
@@ -848,6 +887,23 @@ def trading_improvements_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def trade_polishing_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text=("✅ " if not TRADE_POLISHING_ENABLED else "") + "OFF",
+                callback_data="settings:set_polishing:off",
+            ),
+            InlineKeyboardButton(
+                text=("✅ " if TRADE_POLISHING_ENABLED else "") + "ON",
+                callback_data="settings:set_polishing:on",
+            ),
+        ],
+        [InlineKeyboardButton(text="📓 Журнал сделок", callback_data="settings:journal")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:menu")],
+    ])
+
+
 def autotrade_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -911,15 +967,14 @@ def api_keyboard() -> InlineKeyboardMarkup:
 keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📊 Статус"), KeyboardButton(text="🧪 Скан сейчас")],
-        [KeyboardButton(text="🏓 Ping"), KeyboardButton(text="🆔 Мой ID")],
-        [KeyboardButton(text="❓ Помощь")],
+        [KeyboardButton(text="🆔 Мой ID"), KeyboardButton(text="❓ Помощь")],
         [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="🧠 Умный алгоритм")],
         [KeyboardButton(text="🤖 Нейросети"), KeyboardButton(text="🧭 Фильтр тренда")],
         [KeyboardButton(text="🔴 Супер сделка"), KeyboardButton(text="₿ Только BTC/ETH")],
         [KeyboardButton(text="📐 Наклонки"), KeyboardButton(text="🚀 Улучшения торговли")],
-        [KeyboardButton(text="💰 Автоторговля")],
-        [KeyboardButton(text="🔑 API")],
-        [KeyboardButton(text="🔕 Отписаться")],
+        [KeyboardButton(text="✨ Полировка торговли"), KeyboardButton(text="💰 Автоторговля")],
+        [KeyboardButton(text="🔑 API"), KeyboardButton(text="🔕 Отписаться")],
+        [KeyboardButton(text="🏓 Ping")],
     ],
     resize_keyboard=True,
 )
@@ -968,6 +1023,11 @@ class SignalCandidate:
     super_deal_score: int = 0
     slope_level: Optional[SlopeLevelInfo] = None
     slope_chart_png: Optional[bytes] = None
+    long_probability: Optional[int] = None
+    short_probability: Optional[int] = None
+    manual_slope_total_pct: Optional[float] = None
+    manual_slope_per_candle_pct: Optional[float] = None
+    manual_slope_candles: Optional[int] = None
 
 
 @dataclass
@@ -1677,6 +1737,11 @@ def apply_neural_optimizer(candidate: Optional[SignalCandidate], candles: list[d
         super_deal_score=candidate.super_deal_score,
         slope_level=candidate.slope_level,
         slope_chart_png=candidate.slope_chart_png,
+        long_probability=candidate.long_probability,
+        short_probability=candidate.short_probability,
+        manual_slope_total_pct=candidate.manual_slope_total_pct,
+        manual_slope_per_candle_pct=candidate.manual_slope_per_candle_pct,
+        manual_slope_candles=candidate.manual_slope_candles,
     )
 
 
@@ -1696,6 +1761,11 @@ def clone_candidate(candidate: SignalCandidate, probability: int, reasons: Optio
         super_deal_score=candidate.super_deal_score,
         slope_level=candidate.slope_level,
         slope_chart_png=candidate.slope_chart_png,
+        long_probability=candidate.long_probability,
+        short_probability=candidate.short_probability,
+        manual_slope_total_pct=candidate.manual_slope_total_pct,
+        manual_slope_per_candle_pct=candidate.manual_slope_per_candle_pct,
+        manual_slope_candles=candidate.manual_slope_candles,
     )
 
 
@@ -1831,7 +1901,7 @@ def trade_pnl_usdt_estimate(trade: dict[str, Any]) -> float:
 
 
 def loss_limit_block_reason(equity: Optional[float] = None) -> Optional[str]:
-    if not trading_improvements_active():
+    if not trade_safety_controls_active():
         return None
     equity_value = float(equity or ACCOUNT_EQUITY_USDT)
     now = time.time()
@@ -2033,7 +2103,8 @@ def improvements_stats_text() -> str:
         f"Пауза после серии минусов: <b>{MAX_CONSECUTIVE_LOSSES}</b> минуса → <b>{PAUSE_AFTER_LOSS_STREAK_HOURS}</b> ч\n"
         f"Частичные TP: <b>{TP1_CLOSE_PERCENT}% / {TP2_CLOSE_PERCENT}% / {TP3_CLOSE_PERCENT}%</b>\n"
         f"Breakeven после TP1: <b>{'ON' if MOVE_SL_TO_BREAKEVEN_AFTER_TP1 else 'OFF'}</b>\n"
-        f"Макс. спред LIVE: <b>{MAX_SPREAD_PCT:g}%</b>\n\n"
+        f"Макс. спред LIVE: <b>{MAX_SPREAD_PCT:g}%</b>\n"
+        f"Полировка торговли: <b>{html.escape(trade_polishing_label())}</b>\n\n"
         "<b>Статистика закрытых сделок:</b>\n"
         f"Всего: <b>{len(values)}</b>, WR: <b>{wr:.0f}%</b>, PF: <b>{pf:.2f}</b>, avg: <b>{avg:+.2f}%</b>\n"
         f"Оценочный PnL: <b>{estimated_pnl:+.2f} USDT</b>\n"
@@ -2043,6 +2114,209 @@ def improvements_stats_text() -> str:
         f"{counters_text}"
     )
 
+
+
+
+def positive_reward_pct(entry: float, target: float, side: str) -> float:
+    value = pct_from_entry(target, entry)
+    return -value if side.upper() == "SHORT" else value
+
+
+def positive_risk_pct(entry: float, stop: float, side: str) -> float:
+    value = pct_from_entry(stop, entry)
+    return value if side.upper() == "SHORT" else -value
+
+
+def estimate_roundtrip_cost_pct(market_meta: Optional[dict[str, Any]] = None, funding_rate_pct: Optional[float] = None) -> dict[str, float]:
+    market_meta = market_meta or {}
+    spread_pct = 0.0
+    try:
+        spread_pct = max(0.0, float(market_meta.get("spread_pct") or 0.0))
+    except Exception:
+        spread_pct = 0.0
+    fee_pct = max(0.0, float(POLISH_TAKER_FEE_PCT)) * 2.0
+    slippage_pct = max(0.0, float(POLISH_SLIPPAGE_PCT)) * 2.0
+    funding_pct = max(0.0, float(POLISH_FUNDING_RESERVE_PCT))
+    if funding_rate_pct is not None:
+        try:
+            funding_pct = max(funding_pct, abs(float(funding_rate_pct)))
+        except Exception:
+            pass
+    total_pct = spread_pct + fee_pct + slippage_pct + funding_pct
+    return {
+        "spread_pct": spread_pct,
+        "fee_pct": fee_pct,
+        "slippage_pct": slippage_pct,
+        "funding_pct": funding_pct,
+        "total_cost_pct": total_pct,
+    }
+
+
+def trade_polishing_metrics(
+    candidate: SignalCandidate,
+    market_meta: Optional[dict[str, Any]] = None,
+    funding_rate_pct: Optional[float] = None,
+) -> dict[str, Any]:
+    side = candidate.side.upper()
+    entry = float(candidate.entry)
+    stop = float(candidate.stop)
+    risk_pct = max(0.0, positive_risk_pct(entry, stop, side))
+    costs = estimate_roundtrip_cost_pct(market_meta, funding_rate_pct)
+    effective_risk_pct = risk_pct + costs["total_cost_pct"]
+    tp_metrics: list[dict[str, Any]] = []
+    for index, tp in enumerate(candidate.take_profits, start=1):
+        reward_pct = max(0.0, positive_reward_pct(entry, float(tp), side))
+        net_reward_pct = reward_pct - costs["total_cost_pct"]
+        net_rr = net_reward_pct / effective_risk_pct if effective_risk_pct > 0 else 0.0
+        tp_metrics.append({
+            "tp": index,
+            "price": float(tp),
+            "reward_pct": reward_pct,
+            "net_reward_pct": net_reward_pct,
+            "net_rr": net_rr,
+        })
+    best = max(tp_metrics, key=lambda x: float(x.get("net_rr") or 0.0)) if tp_metrics else None
+    selected_index = max(1, min(len(tp_metrics), AUTO_CLOSE_TP_INDEX)) if tp_metrics else 1
+    selected = tp_metrics[selected_index - 1] if len(tp_metrics) >= selected_index else best
+    required_index = 3 if PARTIAL_TP_ENABLED and len(tp_metrics) >= 3 else min(2, len(tp_metrics) or 1)
+    required = tp_metrics[required_index - 1] if len(tp_metrics) >= required_index else selected
+    return {
+        "risk_pct": risk_pct,
+        "effective_risk_pct": effective_risk_pct,
+        "costs": costs,
+        "tp_metrics": tp_metrics,
+        "best_tp": best,
+        "selected_tp": selected,
+        "required_tp": required,
+        "required_tp_index": required_index,
+    }
+
+
+def trade_polishing_block_reason(
+    candidate: SignalCandidate,
+    market_meta: Optional[dict[str, Any]] = None,
+    funding_rate_pct: Optional[float] = None,
+) -> tuple[Optional[str], dict[str, Any]]:
+    if not trade_polishing_active():
+        return None, {}
+    metrics = trade_polishing_metrics(candidate, market_meta, funding_rate_pct)
+    risk_pct = float(metrics.get("risk_pct") or 0.0)
+    if risk_pct <= 0:
+        return "некорректное расстояние до стопа", metrics
+    if RISK_PER_TRADE_PERCENT > POLISH_MAX_RISK_PER_TRADE_PERCENT:
+        return (
+            f"риск на сделку {RISK_PER_TRADE_PERCENT:g}% выше лимита "
+            f"{POLISH_MAX_RISK_PER_TRADE_PERCENT:g}%"
+        ), metrics
+    required = metrics.get("required_tp") or {}
+    required_rr = float(required.get("net_rr") or 0.0)
+    if required_rr < POLISH_MIN_NET_RR:
+        tp_label = int(metrics.get("required_tp_index") or 1)
+        return (
+            f"net RR до TP{tp_label} = {required_rr:.2f}, нужно минимум {POLISH_MIN_NET_RR:g}. "
+            "Учтены stop, TP, spread, комиссии, slippage и funding."
+        ), metrics
+    costs = metrics.get("costs") or {}
+    try:
+        spread = float(costs.get("spread_pct") or 0.0)
+        if spread > MAX_SPREAD_PCT:
+            return f"спред {spread:.3f}% выше лимита {MAX_SPREAD_PCT:g}%", metrics
+    except Exception:
+        pass
+    return None, metrics
+
+
+async def fetch_live_funding_rate_pct(exchange_name: str, symbol: str, known_market_symbol: str = "") -> Optional[float]:
+    if AUTO_TRADE_MODE != "live" or not trade_polishing_active():
+        return None
+    exchange = create_ccxt_exchange(exchange_name)
+    try:
+        market_symbol = known_market_symbol or await find_ccxt_market_symbol(exchange, symbol)
+        if not getattr(exchange, "has", {}).get("fetchFundingRate"):
+            return None
+        funding = await exchange.fetch_funding_rate(market_symbol)
+        if isinstance(funding, dict):
+            for key in ("fundingRate", "rate"):
+                value = funding.get(key)
+                if value is not None:
+                    return float(value) * 100.0
+    except Exception:
+        logging.debug("Funding rate unavailable for %s %s", exchange_name, symbol, exc_info=True)
+    finally:
+        try:
+            await exchange.close()
+        except Exception:
+            pass
+    return None
+
+
+def polishing_metrics_text(metrics: dict[str, Any]) -> str:
+    if not metrics:
+        return "нет расчёта"
+    costs = metrics.get("costs") or {}
+    lines = [
+        f"Риск до SL: {float(metrics.get('risk_pct') or 0):.2f}%",
+        f"Эффективный риск с издержками: {float(metrics.get('effective_risk_pct') or 0):.2f}%",
+        (
+            "Издержки: "
+            f"spread {float(costs.get('spread_pct') or 0):.3f}%, "
+            f"fee {float(costs.get('fee_pct') or 0):.3f}%, "
+            f"slippage {float(costs.get('slippage_pct') or 0):.3f}%, "
+            f"funding {float(costs.get('funding_pct') or 0):.3f}%"
+        ),
+    ]
+    for item in metrics.get("tp_metrics") or []:
+        lines.append(
+            f"TP{int(item.get('tp') or 0)}: reward {float(item.get('reward_pct') or 0):.2f}%, "
+            f"net {float(item.get('net_reward_pct') or 0):.2f}%, net RR {float(item.get('net_rr') or 0):.2f}"
+        )
+    return "\n".join(lines)
+
+
+def trade_journal_text(limit: int = 10) -> str:
+    trades = load_trades()
+    if not trades:
+        return "📓 Журнал сделок пуст."
+    trades = sorted(trades, key=lambda t: float(t.get("closed_at") or t.get("opened_at") or 0), reverse=True)[:max(1, limit)]
+    lines = ["<b>📓 Журнал сделок трейдера</b>"]
+    for t in trades:
+        status = str(t.get("status") or "?").upper()
+        pnl = trade_pnl_pct_value(t)
+        net_pnl = t.get("net_pnl_pct")
+        pnl_text = "n/a" if pnl is None else fmt_pct(float(pnl))
+        net_text = "" if net_pnl is None else f", net {fmt_pct(float(net_pnl))}"
+        rr = ""
+        metrics = t.get("polishing_metrics") if isinstance(t.get("polishing_metrics"), dict) else {}
+        req = metrics.get("required_tp") if isinstance(metrics.get("required_tp"), dict) else {}
+        if req:
+            rr = f", RR {float(req.get('net_rr') or 0):.2f}"
+        lines.append(
+            "\n"
+            f"• <code>{html.escape(str(t.get('id', '')))}</code> "
+            f"<b>{html.escape(str(t.get('display_symbol') or t.get('symbol')))} {html.escape(str(t.get('side')))}</b> "
+            f"{status} {html.escape(str(t.get('mode', '')))}\n"
+            f"  вход {html.escape(fmt_price(float(t.get('entry') or 0)))}, "
+            f"SL {html.escape(fmt_price(float(t.get('stop') or 0)))}, "
+            f"PnL {html.escape(pnl_text)}{html.escape(net_text)}{html.escape(rr)}\n"
+            f"  причина входа: {html.escape(str(t.get('open_reason') or 'авто-сигнал'))}\n"
+            f"  причина выхода: {html.escape(str(t.get('close_reason') or 'ещё открыта'))}"
+        )
+    return "\n".join(lines)
+
+
+def trade_polishing_stats_text() -> str:
+    return (
+        "<b>✨ Полировка торговли</b>\n\n"
+        f"Статус: <b>{html.escape(trade_polishing_label())}</b>\n"
+        f"Версия бота: <b>{html.escape(BOT_VERSION)}</b>\n"
+        f"Макс. открытых сделок: <b>{MAX_ACTIVE_TRADES}</b>\n"
+        f"Пауза после минусов: <b>{MAX_CONSECUTIVE_LOSSES}</b> подряд → <b>{PAUSE_AFTER_LOSS_STREAK_HOURS}</b> ч\n"
+        f"Риск на сделку: <b>{RISK_PER_TRADE_PERCENT:g}%</b>, максимум: <b>{POLISH_MAX_RISK_PER_TRADE_PERCENT:g}%</b>\n"
+        f"Минимальный net RR: <b>{POLISH_MIN_NET_RR:g}</b>, предпочтительно: <b>{POLISH_PREFERRED_NET_RR:g}</b>\n"
+        f"Комиссия оценка: <b>{POLISH_TAKER_FEE_PCT:g}% x2</b>, slippage: <b>{POLISH_SLIPPAGE_PCT:g}% x2</b>, funding reserve: <b>{POLISH_FUNDING_RESERVE_PCT:g}%</b>\n\n"
+        "ON запрещает авто-вход, если TP после spread/комиссий/slippage/funding не даёт минимум 2x к эффективному риску. "
+        "Сигналы и ручной анализ при этом не ломаются."
+    )
 
 def get_open_trades() -> list[dict[str, Any]]:
     return [t for t in load_trades() if t.get("status") == "open"]
@@ -2183,6 +2457,96 @@ def risk_reward(entry: float, stop: float, target: float, side: str) -> Optional
     if risk <= 0 or reward <= 0:
         return None
     return reward / risk
+
+
+def direction_probabilities(long_score: float, short_score: float) -> tuple[int, int]:
+    long_value = max(0.0, float(long_score))
+    short_value = max(0.0, float(short_score))
+    total = long_value + short_value
+    if total <= 0:
+        return 50, 50
+    long_probability = int(round(long_value / total * 100.0))
+    long_probability = max(1, min(99, long_probability))
+    short_probability = 100 - long_probability
+    return long_probability, short_probability
+
+
+def manual_analysis_summary_lines(candidate: SignalCandidate) -> list[str]:
+    """Короткий текстовый разбор для ручного ввода монеты.
+
+    Важно: это только анализ. Он не запускает автоторговлю и не меняет авто-скан.
+    """
+    side = candidate.side.upper()
+    lines = [f"📊 Проходимость сигнала: {candidate.probability}%"]
+
+    long_probability = candidate.long_probability
+    short_probability = candidate.short_probability
+    if long_probability is None or short_probability is None:
+        # Резервный расчёт, чтобы ручной анализ всегда показывал LONG/SHORT в процентах.
+        main_probability = max(1, min(99, int(candidate.probability)))
+        if side == "LONG":
+            long_probability = main_probability
+            short_probability = 100 - main_probability
+        else:
+            short_probability = main_probability
+            long_probability = 100 - main_probability
+
+    lines.append(f"🟢 Вероятность LONG: {int(long_probability)}%")
+    lines.append(f"🔴 Вероятность SHORT: {int(short_probability)}%")
+
+    side_probability = int(long_probability) if side == "LONG" else int(short_probability)
+    lines.append(f"🧭 Текущий перевес: {side} {side_probability}%")
+
+    if candidate.manual_slope_total_pct is not None:
+        slope_line = f"📐 Наклон линии: {candidate.manual_slope_total_pct:+.2f}%"
+        if candidate.manual_slope_candles:
+            slope_line += f" за {candidate.manual_slope_candles} св."
+        if candidate.manual_slope_per_candle_pct is not None:
+            slope_line += f" ({candidate.manual_slope_per_candle_pct:+.4f}%/св)"
+        lines.append(slope_line)
+        if candidate.manual_slope_total_pct > 0:
+            lines.append("📈 Наклонка смотрит вверх: давление покупателей выше.")
+        elif candidate.manual_slope_total_pct < 0:
+            lines.append("📉 Наклонка смотрит вниз: давление продавцов выше.")
+
+    entry = float(candidate.entry)
+    stop = float(candidate.stop)
+    if entry > 0 and stop > 0:
+        sl_pct = pct_from_entry(stop, entry)
+        lines.append(f"📍 Entry: {fmt_price(entry)}")
+        lines.append(f"🛑 SL: {fmt_price(stop)} ({fmt_pct(sl_pct)} от входа)")
+        if candidate.take_profits:
+            tp = float(candidate.take_profits[0])
+            tp_pct = pct_from_entry(tp, entry)
+            rr = risk_reward(entry, stop, tp, side)
+            rr_text = f", RR {rr:.2f}" if rr is not None else ""
+            lines.append(f"🎯 TP1: {fmt_price(tp)} ({fmt_pct(tp_pct)}{rr_text})")
+
+    if candidate.probability >= MIN_SIGNAL_PROBABILITY:
+        lines.append("✅ Вывод: условия выше порога авто-сигнала, но ручной анализ сам сделку не открывает.")
+    else:
+        lines.append(f"⏳ Вывод: ниже порога авто-сигнала {MIN_SIGNAL_PROBABILITY}%, лучше ждать подтверждение.")
+    return lines
+
+
+def manual_scan_photo_caption(candidate: SignalCandidate) -> str:
+    lines = [f"🔎 Ручной анализ: {display_symbol(candidate.symbol)} {candidate.side}"]
+    lines.extend(manual_analysis_summary_lines(candidate))
+    level = candidate.slope_level
+    if level is not None:
+        slope_pct_per_candle = level.slope / max(candidate.entry, 1e-12) * 100.0
+        lines.extend([
+            f"📐 Строгая наклонка: {level.kind}",
+            f"Вероятность уровня: {level.probability}%",
+            f"Касаний: {level.touches}, расстояние: {level.distance_atr:.2f} ATR",
+            f"Наклон уровня: {slope_pct_per_candle:+.4f}%/св",
+        ])
+    lines.append("ℹ️ Ручной анализ не запускает автоторговлю.")
+    # Telegram ограничивает caption, поэтому оставляем самое важное.
+    caption = "\n".join(lines)
+    if len(caption) > 1000:
+        caption = "\n".join(lines[:12])
+    return caption
 
 
 def structured_signal_text(
@@ -3023,6 +3387,11 @@ def apply_trend_filter(candidate: Optional[SignalCandidate], trend: Optional[Tre
         super_deal_score=candidate.super_deal_score,
         slope_level=candidate.slope_level,
         slope_chart_png=candidate.slope_chart_png,
+        long_probability=candidate.long_probability,
+        short_probability=candidate.short_probability,
+        manual_slope_total_pct=candidate.manual_slope_total_pct,
+        manual_slope_per_candle_pct=candidate.manual_slope_per_candle_pct,
+        manual_slope_candles=candidate.manual_slope_candles,
     )
 
 
@@ -3042,7 +3411,7 @@ def trend_to_dict(trend: Optional[TrendInfo]) -> Optional[dict[str, Any]]:
 def build_stop_and_tps(side: str, entry: float, atr_value: float) -> tuple[float, list[float]]:
     min_risk = entry * (MIN_RISK_PCT / 100)
     risk = max(atr_value * STOP_ATR_MULTIPLIER, min_risk)
-    multipliers = [1.0, 1.7, 2.5]
+    multipliers = [1.2, 2.0, 3.0] if TRADE_POLISHING_ENABLED else [1.0, 1.7, 2.5]
     if side == "LONG":
         stop = max(entry - risk, entry * 0.0001)
         tps = [entry + risk * m for m in multipliers]
@@ -3167,6 +3536,8 @@ def analyze_candles(symbol: str, candles: list[dict[str, float]], allow_weak: bo
             short_score = max(short_score, long_score + 1, 50)
             short_reasons.append("ручной скан: слабый перевес SHORT, проверяю наклонку отдельно")
 
+    long_probability, short_probability = direction_probabilities(long_score, short_score)
+
     if long_score > short_score:
         side = "LONG"
         probability = min(95, int(round(long_score)))
@@ -3177,7 +3548,18 @@ def analyze_candles(symbol: str, candles: list[dict[str, float]], allow_weak: bo
         reasons = short_reasons or ["шорт-скоринг выше лонг-скоринга"]
 
     stop, tps = build_stop_and_tps(side, entry, atr_now)
-    return SignalCandidate(symbol=symbol, side=side, probability=probability, entry=entry, stop=stop, take_profits=tps, reasons=reasons[:5], timeframe=SIGNAL_TIMEFRAME)
+    return SignalCandidate(
+        symbol=symbol,
+        side=side,
+        probability=probability,
+        entry=entry,
+        stop=stop,
+        take_profits=tps,
+        reasons=reasons[:5],
+        timeframe=SIGNAL_TIMEFRAME,
+        long_probability=long_probability,
+        short_probability=short_probability,
+    )
 
 
 def build_manual_slope_probe_candidate(
@@ -3228,6 +3610,7 @@ def build_manual_slope_probe_candidate(
         "ручной скан: порог автоотправки не блокирует проверку наклонки",
         "базовый сетап слабый, отдельно ищу наклонный уровень",
     ]
+    long_probability, short_probability = (52, 48) if side == "LONG" else (48, 52)
     return SignalCandidate(
         symbol=symbol,
         side=side,
@@ -3238,6 +3621,8 @@ def build_manual_slope_probe_candidate(
         reasons=reasons,
         timeframe=SIGNAL_TIMEFRAME,
         trend=trend,
+        long_probability=long_probability,
+        short_probability=short_probability,
     )
 
 
@@ -3257,6 +3642,11 @@ def attach_trend_to_candidate(candidate: SignalCandidate, trend: Optional[TrendI
         super_deal_score=candidate.super_deal_score,
         slope_level=candidate.slope_level,
         slope_chart_png=candidate.slope_chart_png,
+        long_probability=candidate.long_probability,
+        short_probability=candidate.short_probability,
+        manual_slope_total_pct=candidate.manual_slope_total_pct,
+        manual_slope_per_candle_pct=candidate.manual_slope_per_candle_pct,
+        manual_slope_candles=candidate.manual_slope_candles,
     )
 
 
@@ -3809,14 +4199,60 @@ def render_manual_slope_percent_chart(candidate: SignalCandidate, candles: list[
 
 
 def attach_manual_slope_chart(candidate: Optional[SignalCandidate], candles: list[dict[str, float]]) -> Optional[SignalCandidate]:
-    """Добавляет график с наклонкой в процентах к ручному анализу, не меняя авто-логику."""
+    """Добавляет график и проценты наклона к ручному анализу, не меняя авто-логику."""
     if candidate is None:
         return None
+    info = manual_slope_percent_info(candles)
     if candidate.slope_chart_png:
-        return candidate
+        if info is None:
+            return candidate
+        return SignalCandidate(
+            symbol=candidate.symbol,
+            side=candidate.side,
+            probability=candidate.probability,
+            entry=candidate.entry,
+            stop=candidate.stop,
+            take_profits=list(candidate.take_profits),
+            reasons=list(candidate.reasons),
+            timeframe=candidate.timeframe,
+            trend=candidate.trend,
+            ai_optimizer=candidate.ai_optimizer,
+            is_super_deal=candidate.is_super_deal,
+            super_deal_score=candidate.super_deal_score,
+            slope_level=candidate.slope_level,
+            slope_chart_png=candidate.slope_chart_png,
+            long_probability=candidate.long_probability,
+            short_probability=candidate.short_probability,
+            manual_slope_total_pct=float(info["total_pct"]),
+            manual_slope_per_candle_pct=float(info["per_candle_pct"]),
+            manual_slope_candles=int(info["candles"]),
+        )
     chart_png, slope_reason = render_manual_slope_percent_chart(candidate, candles)
+
     if not chart_png:
-        return candidate
+        if info is None:
+            return candidate
+        return SignalCandidate(
+            symbol=candidate.symbol,
+            side=candidate.side,
+            probability=candidate.probability,
+            entry=candidate.entry,
+            stop=candidate.stop,
+            take_profits=list(candidate.take_profits),
+            reasons=list(candidate.reasons),
+            timeframe=candidate.timeframe,
+            trend=candidate.trend,
+            ai_optimizer=candidate.ai_optimizer,
+            is_super_deal=candidate.is_super_deal,
+            super_deal_score=candidate.super_deal_score,
+            slope_level=candidate.slope_level,
+            slope_chart_png=candidate.slope_chart_png,
+            long_probability=candidate.long_probability,
+            short_probability=candidate.short_probability,
+            manual_slope_total_pct=float(info["total_pct"]),
+            manual_slope_per_candle_pct=float(info["per_candle_pct"]),
+            manual_slope_candles=int(info["candles"]),
+        )
     reasons = list(candidate.reasons)
     if slope_reason:
         reasons.append(slope_reason)
@@ -3835,6 +4271,11 @@ def attach_manual_slope_chart(candidate: Optional[SignalCandidate], candles: lis
         super_deal_score=candidate.super_deal_score,
         slope_level=candidate.slope_level,
         slope_chart_png=chart_png,
+        long_probability=candidate.long_probability,
+        short_probability=candidate.short_probability,
+        manual_slope_total_pct=float(info["total_pct"]) if info is not None else candidate.manual_slope_total_pct,
+        manual_slope_per_candle_pct=float(info["per_candle_pct"]) if info is not None else candidate.manual_slope_per_candle_pct,
+        manual_slope_candles=int(info["candles"]) if info is not None else candidate.manual_slope_candles,
     )
 
 def apply_slope_level_filter(
@@ -3879,7 +4320,13 @@ def apply_slope_level_filter(
         super_deal_score=candidate.super_deal_score,
         slope_level=level,
         slope_chart_png=chart_png,
+        long_probability=candidate.long_probability,
+        short_probability=candidate.short_probability,
+        manual_slope_total_pct=candidate.manual_slope_total_pct,
+        manual_slope_per_candle_pct=candidate.manual_slope_per_candle_pct,
+        manual_slope_candles=candidate.manual_slope_candles,
     )
+
 
 
 def super_deal_probability(candidate: SignalCandidate) -> int:
@@ -3941,6 +4388,11 @@ def apply_super_deal_filter(candidate: Optional[SignalCandidate]) -> Optional[Si
         super_deal_score=trend_score,
         slope_level=candidate.slope_level,
         slope_chart_png=candidate.slope_chart_png,
+        long_probability=candidate.long_probability,
+        short_probability=candidate.short_probability,
+        manual_slope_total_pct=candidate.manual_slope_total_pct,
+        manual_slope_per_candle_pct=candidate.manual_slope_per_candle_pct,
+        manual_slope_candles=candidate.manual_slope_candles,
     )
 
 
@@ -4413,7 +4865,8 @@ def improved_position_notional(candidate: SignalCandidate, equity_usdt: float, r
     risk_pct_to_stop = abs(float(candidate.entry) - float(candidate.stop)) / max(float(candidate.entry), 1e-12) * 100.0
     if risk_pct_to_stop <= 0:
         return min(TRADE_MARGIN_USDT, MAX_POSITION_NOTIONAL_USDT)
-    risk_usdt = float(equity_usdt) * RISK_PER_TRADE_PERCENT / 100.0
+    risk_pct = min(float(RISK_PER_TRADE_PERCENT), float(POLISH_MAX_RISK_PER_TRADE_PERCENT)) if TRADE_POLISHING_ENABLED else float(RISK_PER_TRADE_PERCENT)
+    risk_usdt = float(equity_usdt) * risk_pct / 100.0
     notional = risk_usdt / (risk_pct_to_stop / 100.0)
     cap = min(MAX_POSITION_NOTIONAL_USDT, max(1.0, TRADE_MARGIN_USDT))
     notional = min(max(1.0, notional), cap)
@@ -4423,7 +4876,7 @@ def improved_position_notional(candidate: SignalCandidate, equity_usdt: float, r
 
 
 async def fetch_live_market_quality(exchange_name: str, symbol: str, known_market_symbol: str = "") -> tuple[bool, str, dict[str, Any]]:
-    if not trading_improvements_active() or not LIQUIDITY_FILTER_ENABLED:
+    if not trade_safety_controls_active() or not LIQUIDITY_FILTER_ENABLED:
         return True, "disabled", {}
     exchange = create_ccxt_exchange(exchange_name)
     try:
@@ -4714,29 +5167,45 @@ async def open_autotrade_for_signal(bot: Bot, candidate: SignalCandidate) -> Opt
         )
         return None
 
-    if TRADING_IMPROVEMENTS_ENABLED:
+    quality_meta: dict[str, Any] = {}
+    funding_rate_pct: Optional[float] = None
+    if trade_safety_controls_active():
         block_reason = loss_limit_block_reason()
         if block_reason:
             increment_improvement_counter("blocked_trade_loss_limits")
-            await broadcast_to_admins(bot, f"⛔️ Улучшения торговли: сделка не открыта — {html.escape(block_reason)}.")
+            await broadcast_to_admins(bot, f"⛔️ Риск-защита: сделка не открыта — {html.escape(block_reason)}.")
             return None
-        block_reason = exposure_block_reason(candidate)
-        if block_reason:
-            increment_improvement_counter("blocked_trade_exposure")
-            await broadcast_to_admins(bot, f"⛔️ Улучшения торговли: сделка не открыта — {html.escape(block_reason)}.")
-            return None
+        if TRADING_IMPROVEMENTS_ENABLED:
+            block_reason = exposure_block_reason(candidate)
+            if block_reason:
+                increment_improvement_counter("blocked_trade_exposure")
+                await broadcast_to_admins(bot, f"⛔️ Улучшения торговли: сделка не открыта — {html.escape(block_reason)}.")
+                return None
         if AUTO_TRADE_MODE == "live":
             ok_quality, quality_reason, quality_meta = await fetch_live_market_quality(exchange_value, symbol)
             if not ok_quality:
                 increment_improvement_counter("blocked_trade_spread_liquidity")
                 await broadcast_to_admins(bot, f"⛔️ LIVE-сделка отменена: {html.escape(quality_reason)}.")
                 return None
+            funding_rate_pct = await fetch_live_funding_rate_pct(exchange_value, symbol)
+
+    polishing_block, polishing_metrics = trade_polishing_block_reason(candidate, quality_meta, funding_rate_pct)
+    if polishing_block:
+        increment_improvement_counter("blocked_trade_polishing")
+        await broadcast_to_admins(
+            bot,
+            "⛔️ <b>Полировка торговли: вход запрещён</b>\n"
+            f"Пара: <b>{html.escape(display_symbol(symbol))}</b> {html.escape(candidate.side)}\n"
+            f"Причина: {html.escape(polishing_block)}\n\n"
+            f"<pre>{html.escape(polishing_metrics_text(polishing_metrics))}</pre>"
+        )
+        return None
 
     # В обычном режиме TRADE_MARGIN_USDT трактуется как максимальный USDT-объём позиции.
     # При включённых улучшениях объём рассчитывается риск-движком по расстоянию до стопа.
     equity_usdt = ACCOUNT_EQUITY_USDT
     notional_usdt = float(TRADE_MARGIN_USDT)
-    if TRADING_IMPROVEMENTS_ENABLED:
+    if trade_safety_controls_active():
         equity_usdt = await fetch_account_equity_usdt(exchange_value)
         regime = None
         try:
@@ -4768,10 +5237,17 @@ async def open_autotrade_for_signal(bot: Bot, candidate: SignalCandidate) -> Opt
         "entry": candidate.entry,
         "stop": candidate.stop,
         "take_profits": candidate.take_profits,
-        "tp_index": AUTO_CLOSE_TP_INDEX,
+        "tp_index": 3 if TRADE_POLISHING_ENABLED and len(candidate.take_profits) >= 3 else AUTO_CLOSE_TP_INDEX,
         "improvements_enabled": TRADING_IMPROVEMENTS_ENABLED,
-        "risk_per_trade_percent": RISK_PER_TRADE_PERCENT if TRADING_IMPROVEMENTS_ENABLED else None,
-        "account_equity_usdt": equity_usdt if TRADING_IMPROVEMENTS_ENABLED else None,
+        "trade_polishing_enabled": TRADE_POLISHING_ENABLED,
+        "risk_per_trade_percent": min(float(RISK_PER_TRADE_PERCENT), float(POLISH_MAX_RISK_PER_TRADE_PERCENT)) if trade_safety_controls_active() else None,
+        "account_equity_usdt": equity_usdt if trade_safety_controls_active() else None,
+        "polishing_metrics": polishing_metrics if TRADE_POLISHING_ENABLED else {},
+        "market_quality_meta": quality_meta,
+        "funding_rate_pct": funding_rate_pct,
+        "open_reason": "авто-сигнал после фильтров" + (" + полировка торговли" if TRADE_POLISHING_ENABLED else ""),
+        "signal_reasons": list(candidate.reasons),
+        "bot_version": BOT_VERSION,
         "initial_notional_usdt": notional_usdt,
         "notional_usdt": notional_usdt,
         "amount": amount,
@@ -4850,11 +5326,13 @@ async def open_autotrade_for_signal(bot: Bot, candidate: SignalCandidate) -> Opt
             f"Пара: <b>{html.escape(display_symbol(symbol))}</b>\n"
             f"Сторона: <b>{candidate.side}</b>\n"
             f"Объём позиции: <b>${notional_usdt:g}</b>\n"
-            + (f"Риск-движок: <b>{RISK_PER_TRADE_PERCENT:g}% от ${equity_usdt:g}</b>\n" if TRADING_IMPROVEMENTS_ENABLED else "")
+            + (f"Риск-движок: <b>{min(float(RISK_PER_TRADE_PERCENT), float(POLISH_MAX_RISK_PER_TRADE_PERCENT)):g}% от ${equity_usdt:g}</b>\n" if trade_safety_controls_active() else "")
+            + ("Полировка: <b>ON</b> — net RR и издержки проверены\n" if TRADE_POLISHING_ENABLED else "")
             + f"Amount: <b>{html.escape(str(trade['amount']))}</b>\n"
-            f"Закрытие: <b>SL или TP{AUTO_CLOSE_TP_INDEX}</b>"
+            f"Закрытие: <b>SL или TP{int(trade.get('tp_index', AUTO_CLOSE_TP_INDEX))}</b>"
             + (f"\nТренд-фильтр: <b>{html.escape(trend_filter_label())}</b>" if TREND_FILTER_ENABLED else "")
             + (f"\nУлучшения торговли: <b>{html.escape(trading_improvements_label())}</b>" if TRADING_IMPROVEMENTS_ENABLED else "")
+            + (f"\nПолировка торговли: <b>{html.escape(trade_polishing_label())}</b>" if TRADE_POLISHING_ENABLED else "")
             + f"{protection_note}"
         )
         return trade
@@ -4884,6 +5362,14 @@ async def mark_trade_closed(
                 item["close_price"] = close_price
                 if pnl_pct is not None:
                     item["pnl_pct"] = pnl_pct
+                    costs = (item.get("polishing_metrics") or {}).get("costs") if isinstance(item.get("polishing_metrics"), dict) else {}
+                    try:
+                        cost_pct = float((costs or {}).get("total_cost_pct") or 0.0)
+                    except Exception:
+                        cost_pct = 0.0
+                    if item.get("trade_polishing_enabled"):
+                        item["estimated_roundtrip_cost_pct"] = cost_pct
+                        item["net_pnl_pct"] = float(pnl_pct) - cost_pct
                 item["last_synced_at"] = now
                 updated = True
                 break
@@ -4893,6 +5379,15 @@ async def mark_trade_closed(
         return False
 
     pnl_text = "n/a" if pnl_pct is None else fmt_pct(pnl_pct)
+    net_line = ""
+    if trade.get("trade_polishing_enabled") and pnl_pct is not None:
+        metrics = trade.get("polishing_metrics") if isinstance(trade.get("polishing_metrics"), dict) else {}
+        costs = metrics.get("costs") if isinstance(metrics.get("costs"), dict) else {}
+        try:
+            cost_pct = float(costs.get("total_cost_pct") or 0.0)
+            net_line = f"\nNet PnL после оценочных издержек: <b>{html.escape(fmt_pct(float(pnl_pct) - cost_pct))}</b>"
+        except Exception:
+            net_line = ""
     await broadcast_to_admins(
         bot,
         "✅ <b>Авто-сделка закрыта</b>\n"
@@ -4901,6 +5396,7 @@ async def mark_trade_closed(
         f"Причина: <b>{html.escape(reason)}</b>\n"
         f"Цена закрытия: <b>{html.escape(fmt_price(close_price))}</b>\n"
         f"PnL примерно: <b>{html.escape(pnl_text)}</b>"
+        f"{net_line}"
         f"{extra}"
     )
     return True
@@ -5423,6 +5919,9 @@ async def answer_single_symbol_scan(message: Message, symbol_text: str) -> None:
         super_deal=candidate.is_super_deal,
         manual_analysis=True,
     )
+    summary_lines = manual_analysis_summary_lines(candidate)
+    if summary_lines:
+        text += "\n\n" + html.escape("\n".join(summary_lines))
     if candidate.probability < MIN_SIGNAL_PROBABILITY:
         text += f"\n\nℹ️ Ниже порога автоотправки: {candidate.probability}% < {MIN_SIGNAL_PROBABILITY}%."
     if scan_note:
@@ -5432,7 +5931,7 @@ async def answer_single_symbol_scan(message: Message, symbol_text: str) -> None:
     if candidate.slope_chart_png:
         await message.answer_photo(
             BufferedInputFile(candidate.slope_chart_png, filename=f"{compact_symbol(candidate.symbol)}_slope.png"),
-            caption=slope_chart_caption(candidate),
+            caption=manual_scan_photo_caption(candidate),
         )
     await message.answer(text)
 
@@ -5451,7 +5950,7 @@ async def cmd_start(message: Message) -> None:
         "Привет! Я Telegram-бот для автоматических торговых сигналов.\n\n"
         "Ты подписан на сигналы. Бот сам сканирует рынок и отправляет сетапы "
         f"с проходимостью от {MIN_SIGNAL_PROBABILITY}% и выше.\n\n"
-        "Команды: /help, /status, /settings, /scan, /ping, /super_deal, /btc_eth, /naklonki, /improvements, /id, /stop",
+        "Команды: /help, /status, /settings, /scan, /ping, /super_deal, /btc_eth, /naklonki, /improvements, /polishing, /journal, /id, /stop",
         reply_markup=keyboard,
     )
 
@@ -5472,6 +5971,8 @@ async def cmd_help(message: Message) -> None:
             "• /btc_eth — режим только BTC/ETH со строгими подтверждениями\n"
             "• /naklonki — наклонные уровни: фильтр + график в сигнале\n"
             "• /improvements — Улучшения торговли ON/OFF\n"
+            "• /polishing — Полировка торговли ON/OFF\n"
+            "• /journal — журнал сделок трейдера\n"
             "• /stats — расширенная статистика сделок и фильтров\n"
             "• /panic — остановить автоторговлю, отменить защиту и закрыть позиции\n"
             "• /api — API ключи для LIVE-торговли\n"
@@ -5500,6 +6001,8 @@ async def cmd_help(message: Message) -> None:
         "• /btc_eth — режим только BTC/ETH\n"
         "• /naklonki — наклонные уровни + график\n"
         "• /improvements — Улучшения торговли\n"
+        "• /polishing — Полировка торговли\n"
+        "• /journal — журнал сделок\n"
         "• /stats — статистика торговли\n"
         "• /api — API ключи для автоторговли\n"
         "• /trades — активные авто-сделки\n"
@@ -5545,6 +6048,7 @@ async def cmd_status(message: Message) -> None:
         f"Только BTC/ETH: <b>{html.escape(btc_eth_only_label())}</b>\n"
         f"Наклонки: <b>{html.escape(slope_levels_label())}</b>\n"
         f"Улучшения торговли: <b>{html.escape(trading_improvements_label())}</b>\n"
+        f"Полировка торговли: <b>{html.escape(trade_polishing_label())}</b>\n"
         f"Автоторговля: <b>{html.escape(autotrade_label())}</b>\n"
         f"API текущей биржи: <b>{'есть' if has_api_keys(MARKET_DATA_PROVIDER) else 'нет'}</b>\n"
         f"Маржа/объём сделки: <b>${TRADE_MARGIN_USDT:g}</b>\n"
@@ -5553,6 +6057,7 @@ async def cmd_status(message: Message) -> None:
         f"Синхронизация позиций: <b>каждые {SYNC_POSITIONS_INTERVAL_SECONDS} сек.</b>\n"
         f"Хранилище data: <code>{html.escape(str(DATA_DIR))}</code>\n"
         f"Открытых авто-сделок: <b>{len(get_open_trades())}</b> / {MAX_ACTIVE_TRADES}\n"
+        f"Версия бота: <b>{html.escape(BOT_VERSION)}</b>\n"
         f"Отчёты админу: <b>{'включены' if AUTO_SCAN_REPORTS_TO_ADMINS else 'выключены'}</b>\n"
         f"Режим монет: <b>{html.escape(symbols_mode_text())}</b>\n"
         f"Фолбэк-монет: <b>{len(SYMBOLS)}</b>\n"
@@ -5732,6 +6237,22 @@ async def cmd_improvements(message: Message) -> None:
         "• команды /panic и /stats",
         reply_markup=trading_improvements_keyboard(),
     )
+
+
+@dp.message(Command("polishing"))
+async def cmd_polishing(message: Message) -> None:
+    if not is_admin(message.from_user.id):
+        await message.answer("Настройка доступна только админу.")
+        return
+    await message.answer(trade_polishing_stats_text(), reply_markup=trade_polishing_keyboard())
+
+
+@dp.message(Command("journal"))
+async def cmd_journal(message: Message) -> None:
+    if not is_admin(message.from_user.id):
+        await message.answer("Журнал сделок доступен только админу.")
+        return
+    await message.answer(trade_journal_text())
 
 
 @dp.message(Command("stats"))
@@ -5959,7 +6480,7 @@ async def cmd_close_trade(message: Message, command: CommandObject, bot: Bot) ->
 async def settings_callback(callback: CallbackQuery) -> None:
     global AUTO_SIGNALS_ENABLED, SIGNAL_TIMEFRAME, MIN_SIGNAL_PROBABILITY, SCAN_INTERVAL_SECONDS, SIGNAL_COOLDOWN_MINUTES, MAX_SIGNALS_PER_SCAN, MARKET_DATA_PROVIDER
     global AUTO_TRADE_MODE, TRADE_MARGIN_USDT, AUTO_CLOSE_TP_INDEX, SMART_ALGORITHM_ENABLED
-    global NEURAL_OPTIMIZER_ENABLED, SUPER_DEAL_ENABLED, BTC_ETH_ONLY_MODE_ENABLED, SLOPE_LEVELS_ENABLED, SLOPE_LEVELS_MODE, TRADING_IMPROVEMENTS_ENABLED
+    global NEURAL_OPTIMIZER_ENABLED, SUPER_DEAL_ENABLED, BTC_ETH_ONLY_MODE_ENABLED, SLOPE_LEVELS_ENABLED, SLOPE_LEVELS_MODE, TRADING_IMPROVEMENTS_ENABLED, TRADE_POLISHING_ENABLED
     global TREND_FILTER_ENABLED, TREND_TIMEFRAME
 
     if callback.from_user is None or not is_admin(callback.from_user.id):
@@ -6153,13 +6674,27 @@ async def settings_callback(callback: CallbackQuery) -> None:
         await callback.answer()
         return
 
+    if data == "settings:polishing":
+        await message.edit_text(trade_polishing_stats_text(), reply_markup=trade_polishing_keyboard())
+        await callback.answer()
+        return
+
+    if data == "settings:journal":
+        await message.edit_text(
+            trade_journal_text(),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:polishing")]]),
+        )
+        await callback.answer()
+        return
+
     if data == "settings:autotrade":
         await message.edit_text(
             "<b>💰 Автоторговля</b>\n\n"
             f"Режим: <b>{html.escape(autotrade_label())}</b>\n"
             f"Маржа/объём сделки: <b>${TRADE_MARGIN_USDT:g}</b>\n"
             f"Авто-закрытие: <b>SL или TP{AUTO_CLOSE_TP_INDEX}</b>\n"
-            f"Открытых сделок: <b>{len(get_open_trades())}</b>\n\n"
+            f"Открытых сделок: <b>{len(get_open_trades())}</b> / {MAX_ACTIVE_TRADES}\n"
+            f"Полировка торговли: <b>{html.escape(trade_polishing_label())}</b>\n\n"
             "OFF — только сигналы. PAPER — тест без ордеров. LIVE — реальные ордера + биржевые SL/TP где поддерживаются + синхронизация.",
             reply_markup=autotrade_keyboard(),
         )
@@ -6409,6 +6944,17 @@ async def settings_callback(callback: CallbackQuery) -> None:
             await callback.answer("Неверное значение", show_alert=True)
         return
 
+    if data.startswith("settings:set_polishing:"):
+        value = data.split(":", 2)[2].lower()
+        if value in {"on", "off"}:
+            TRADE_POLISHING_ENABLED = value == "on"
+            save_runtime_settings()
+            await message.edit_text(settings_menu_text(), reply_markup=settings_keyboard())
+            await callback.answer("Полировка торговли включена" if TRADE_POLISHING_ENABLED else "Полировка торговли выключена")
+        else:
+            await callback.answer("Неверное значение", show_alert=True)
+        return
+
     if data.startswith("settings:set_autotrade_mode:"):
         value = data.split(":", 2)[2].lower()
         if value in AUTO_TRADE_MODE_OPTIONS:
@@ -6470,6 +7016,7 @@ async def cmd_ping(message: Message) -> None:
     elapsed_ms = (time.perf_counter() - started) * 1000
     await progress.edit_text(
         "🏓 <b>PONG</b>\n"
+        f"Versia bota: <b>{html.escape(BOT_VERSION)}</b>\n"
         f"Ответ бота: <b>{elapsed_ms:.0f} мс</b>\n"
         f"Аптайм процесса: <b>{html.escape(uptime_text())}</b>\n"
         f"Хранилище: <code>{html.escape(str(DATA_DIR))}</code>"
@@ -6638,6 +7185,11 @@ async def button_slope_levels(message: Message) -> None:
 @dp.message(F.text == "🚀 Улучшения торговли")
 async def button_improvements(message: Message) -> None:
     await cmd_improvements(message)
+
+
+@dp.message(F.text == "✨ Полировка торговли")
+async def button_polishing(message: Message) -> None:
+    await cmd_polishing(message)
 
 
 @dp.message(F.text == "💰 Автоторговля")
