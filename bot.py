@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 import uuid
 import fcntl
@@ -24,7 +25,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BOT_STARTED_AT = time.time()
-BOT_VERSION = "1023"
+BOT_VERSION = "1025"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
@@ -238,20 +239,39 @@ WALK_FORWARD_OPTIMIZER_ENABLED = True
 WALK_FORWARD_TRAIN_RATIO = 0.7
 WALK_FORWARD_MIN_TEST_TRADES = 2
 
-# ---- ETH Profit ----
-# Изолированный режим глубокого анализа ETH. Когда ON, авто-скан/автоторговля
-# ставятся на паузу, а ручной ввод "eth profit" запускает многофакторный
-# анализ ETH по таймфреймам, истории похожих паттернов, сессиям, объёмам,
-# funding, тренду, поддержкам/сопротивлениям и даёт план сделки.
+# ---- ETH/BTC Profit ----
+# Изолированные режимы глубокого анализа. Когда любой Profit-режим ON,
+# авто-скан/автоторговля и обычный ручной скан ставятся на паузу.
+# Ручной ввод "eth profit" или "btc profit" запускает многофакторный анализ
+# по таймфреймам, истории похожих паттернов, сессиям, объёмам, funding,
+# тренду, поддержкам/сопротивлениям, бесплатному новостному фону RSS/public
+# и локальному TradingView-style теханализу.
 ETH_PROFIT_MODE_ENABLED = False
+BTC_PROFIT_MODE_ENABLED = False
 ETH_PROFIT_SYMBOL = "ETHUSDT"
+BTC_PROFIT_SYMBOL = "BTCUSDT"
 ETH_PROFIT_MIN_TRADE_PROBABILITY = 65
 ETH_PROFIT_STRONG_TRADE_PROBABILITY = 75
 ETH_PROFIT_RISK_PERCENT = 0.5
 ETH_PROFIT_MAX_RISK_PERCENT = 1.0
 ETH_PROFIT_MAX_LEVERAGE = 3
 ETH_PROFIT_NEWS_ENABLED = True
+# CryptoPanic больше не нужен: новости берутся из бесплатных RSS и публичных лент.
 CRYPTOPANIC_TOKEN = os.getenv("CRYPTOPANIC_TOKEN", "").strip()
+PROFIT_NEWS_RSS_URLS_RAW = os.getenv(
+    "PROFIT_NEWS_RSS_URLS",
+    "https://www.coindesk.com/arc/outboundfeeds/rss/,"
+    "https://cointelegraph.com/rss,"
+    "https://decrypt.co/feed,"
+    "https://cryptoslate.com/feed/,"
+    "https://bitcoinmagazine.com/.rss/full/,"
+    "https://news.google.com/rss/search?q=Bitcoin%20OR%20BTC%20Ethereum%20OR%20ETH%20crypto&hl=en-US&gl=US&ceid=US:en"
+)
+PROFIT_NEWS_RSS_URLS = [u.strip() for u in PROFIT_NEWS_RSS_URLS_RAW.split(",") if u.strip()]
+# Совместимость: если в Railway была старая переменная, тоже учитываем её.
+ETH_PROFIT_NEWS_RSS_URLS_RAW = os.getenv("ETH_PROFIT_NEWS_RSS_URLS", "").strip()
+if ETH_PROFIT_NEWS_RSS_URLS_RAW:
+    PROFIT_NEWS_RSS_URLS.extend([u.strip() for u in ETH_PROFIT_NEWS_RSS_URLS_RAW.split(",") if u.strip()])
 
 MAX_ACTIVE_TRADES = 3
 MAX_ACTIVE_TRADES = max(1, min(20, MAX_ACTIVE_TRADES))
@@ -348,6 +368,7 @@ def save_runtime_settings() -> None:
         "TRADING_IMPROVEMENTS_ENABLED": TRADING_IMPROVEMENTS_ENABLED,
         "TRADE_POLISHING_ENABLED": TRADE_POLISHING_ENABLED,
         "ETH_PROFIT_MODE_ENABLED": ETH_PROFIT_MODE_ENABLED,
+        "BTC_PROFIT_MODE_ENABLED": BTC_PROFIT_MODE_ENABLED,
     })
 
 
@@ -355,7 +376,7 @@ def apply_runtime_settings(settings: dict[str, Any]) -> None:
     global AUTO_SIGNALS_ENABLED, MIN_SIGNAL_PROBABILITY, SIGNAL_TIMEFRAME, SCAN_INTERVAL_SECONDS, SIGNAL_COOLDOWN_MINUTES, MAX_SIGNALS_PER_SCAN, MARKET_DATA_PROVIDER
     global AUTO_TRADE_MODE, TRADE_MARGIN_USDT, AUTO_CLOSE_TP_INDEX, SMART_ALGORITHM_ENABLED
     global NEURAL_OPTIMIZER_ENABLED, SUPER_DEAL_ENABLED, BTC_ETH_ONLY_MODE_ENABLED, SLOPE_LEVELS_ENABLED, SLOPE_LEVELS_MODE, TRADING_IMPROVEMENTS_ENABLED, TRADE_POLISHING_ENABLED
-    global ETH_PROFIT_MODE_ENABLED
+    global ETH_PROFIT_MODE_ENABLED, BTC_PROFIT_MODE_ENABLED
     global TREND_FILTER_ENABLED, TREND_TIMEFRAME
 
     auto_raw = settings.get("AUTO_SIGNALS_ENABLED", AUTO_SIGNALS_ENABLED)
@@ -476,6 +497,17 @@ def apply_runtime_settings(settings: dict[str, Any]) -> None:
         ETH_PROFIT_MODE_ENABLED = eth_profit_raw
     else:
         ETH_PROFIT_MODE_ENABLED = str(eth_profit_raw).strip().lower() in {"1", "true", "yes", "on"}
+
+    btc_profit_raw = settings.get("BTC_PROFIT_MODE_ENABLED", BTC_PROFIT_MODE_ENABLED)
+    if isinstance(btc_profit_raw, bool):
+        BTC_PROFIT_MODE_ENABLED = btc_profit_raw
+    else:
+        BTC_PROFIT_MODE_ENABLED = str(btc_profit_raw).strip().lower() in {"1", "true", "yes", "on"}
+
+    # Одновременно включён только один Profit-режим. Если старый settings.json
+    # случайно хранит оба ON, приоритет отдаём ETH, BTC выключаем.
+    if ETH_PROFIT_MODE_ENABLED and BTC_PROFIT_MODE_ENABLED:
+        BTC_PROFIT_MODE_ENABLED = False
 
 
 def human_interval(seconds: int) -> str:
@@ -617,8 +649,30 @@ def eth_profit_label() -> str:
     return "OFF — обычный режим бота"
 
 
+def btc_profit_label() -> str:
+    if BTC_PROFIT_MODE_ENABLED:
+        return "ON — авто-скан/автоторговля на паузе; команда: btc profit"
+    return "OFF — обычный режим бота"
+
+
+def active_profit_mode_name() -> str:
+    if ETH_PROFIT_MODE_ENABLED:
+        return "ETH Profit"
+    if BTC_PROFIT_MODE_ENABLED:
+        return "BTC Profit"
+    return "Profit"
+
+
+def active_profit_command() -> str:
+    if ETH_PROFIT_MODE_ENABLED:
+        return "eth profit"
+    if BTC_PROFIT_MODE_ENABLED:
+        return "btc profit"
+    return "eth profit / btc profit"
+
+
 def eth_profit_blocks_trading() -> bool:
-    return bool(ETH_PROFIT_MODE_ENABLED)
+    return bool(ETH_PROFIT_MODE_ENABLED or BTC_PROFIT_MODE_ENABLED)
 
 
 def auto_signals_label() -> str:
@@ -646,6 +700,7 @@ def settings_menu_text() -> str:
         f"Улучшения торговли: <b>{html.escape(trading_improvements_label())}</b>\n"
         f"Полировка торговли: <b>{html.escape(trade_polishing_label())}</b>\n"
         f"ETH Profit: <b>{html.escape(eth_profit_label())}</b>\n"
+        f"BTC Profit: <b>{html.escape(btc_profit_label())}</b>\n"
         f"Автоторговля: <b>{html.escape(autotrade_label())}</b>\n"
         f"Маржа/объём сделки: <b>${TRADE_MARGIN_USDT:g}</b>\n"
         f"Авто-закрытие: <b>SL или TP{AUTO_CLOSE_TP_INDEX}</b>\n\n"
@@ -674,7 +729,10 @@ def settings_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📐 Наклонки", callback_data="settings:slope_levels")],
         [InlineKeyboardButton(text="🚀 Улучшения торговли", callback_data="settings:improvements")],
         [InlineKeyboardButton(text="✨ Полировка торговли", callback_data="settings:polishing")],
-        [InlineKeyboardButton(text="💎 ETH Profit", callback_data="settings:eth_profit")],
+        [
+            InlineKeyboardButton(text="💎 ETH Profit", callback_data="settings:eth_profit"),
+            InlineKeyboardButton(text="₿ BTC Profit", callback_data="settings:btc_profit"),
+        ],
         [InlineKeyboardButton(text="💰 Автоторговля", callback_data="settings:autotrade")],
         [InlineKeyboardButton(text="🔑 API ключи", callback_data="settings:api")],
         [InlineKeyboardButton(text="❌ Закрыть", callback_data="settings:close")],
@@ -956,6 +1014,23 @@ def eth_profit_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def btc_profit_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text=("✅ " if not BTC_PROFIT_MODE_ENABLED else "") + "OFF",
+                callback_data="settings:set_btc_profit:off",
+            ),
+            InlineKeyboardButton(
+                text=("✅ " if BTC_PROFIT_MODE_ENABLED else "") + "ON",
+                callback_data="settings:set_btc_profit:on",
+            ),
+        ],
+        [InlineKeyboardButton(text="🔎 Запустить BTC Profit", callback_data="settings:run_btc_profit")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="settings:menu")],
+    ])
+
+
 def autotrade_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -1025,6 +1100,7 @@ keyboard = ReplyKeyboardMarkup(
         [KeyboardButton(text="🔴 Супер сделка"), KeyboardButton(text="₿ Только BTC/ETH")],
         [KeyboardButton(text="📐 Наклонки"), KeyboardButton(text="🚀 Улучшения торговли")],
         [KeyboardButton(text="✨ Полировка торговли"), KeyboardButton(text="💎 ETH Profit")],
+        [KeyboardButton(text="₿ BTC Profit")],
         [KeyboardButton(text="💰 Автоторговля"), KeyboardButton(text="🔑 API")],
         [KeyboardButton(text="🔕 Отписаться")],
         [KeyboardButton(text="🏓 Ping")],
@@ -2202,6 +2278,7 @@ def estimate_roundtrip_cost_pct(market_meta: Optional[dict[str, Any]] = None, fu
         "slippage_pct": slippage_pct,
         "funding_pct": funding_pct,
         "total_cost_pct": total_pct,
+        "total_pct": total_pct,
     }
 
 
@@ -5196,7 +5273,7 @@ async def ensure_live_protection(bot: Bot, trade: dict[str, Any]) -> None:
 
 async def open_autotrade_for_signal(bot: Bot, candidate: SignalCandidate) -> Optional[dict[str, Any]]:
     if eth_profit_blocks_trading():
-        await broadcast_to_admins(bot, "💎 ETH Profit включён: автоторговля на паузе, сделка не открыта.")
+        await broadcast_to_admins(bot, f"{active_profit_mode_name()} включён: автоторговля на паузе, сделка не открыта.")
         return None
     if not autotrading_is_enabled():
         return None
@@ -5792,7 +5869,7 @@ async def auto_signal_worker(bot: Bot) -> None:
     while True:
         try:
             if eth_profit_blocks_trading():
-                logging.info("ETH Profit включён: авто-сканер на паузе")
+                logging.info("%s включён: авто-сканер на паузе", active_profit_mode_name())
                 await asyncio.sleep(SCAN_INTERVAL_SECONDS)
                 continue
             scan_number += 1
@@ -6000,19 +6077,41 @@ async def answer_single_symbol_scan(message: Message, symbol_text: str) -> None:
 
 # ---------- ETH Profit deep analysis ----------
 
-def eth_profit_status_text() -> str:
+def profit_status_text(kind: str) -> str:
+    kind = kind.upper()
+    if kind == "BTC":
+        title = "₿ BTC Profit"
+        status = btc_profit_label()
+        symbol = BTC_PROFIT_SYMBOL
+        command = "btc profit"
+        coin = "BTC"
+    else:
+        title = "💎 ETH Profit"
+        status = eth_profit_label()
+        symbol = ETH_PROFIT_SYMBOL
+        command = "eth profit"
+        coin = "ETH"
     return (
-        "<b>💎 ETH Profit</b>\n\n"
-        f"Статус: <b>{html.escape(eth_profit_label())}</b>\n"
-        f"Монета: <b>{html.escape(display_symbol(ETH_PROFIT_SYMBOL))}</b>\n"
+        f"<b>{html.escape(title)}</b>\n\n"
+        f"Статус: <b>{html.escape(status)}</b>\n"
+        f"Монета: <b>{html.escape(display_symbol(symbol))}</b>\n"
         f"Риск в расчёте: <b>{ETH_PROFIT_RISK_PERCENT:g}%</b> от депозита, максимум <b>{ETH_PROFIT_MAX_RISK_PERCENT:g}%</b>\n"
         f"Максимальное плечо в рекомендации: <b>x{ETH_PROFIT_MAX_LEVERAGE}</b>\n"
-        f"Новостной фон: <b>{'CryptoPanic включён' if CRYPTOPANIC_TOKEN else 'нет токена CRYPTOPANIC_TOKEN, новости считаются нейтральными'}</b>\n\n"
+        f"Новостной фон: <b>бесплатные RSS/public источники без CryptoPanic</b>\n"
+        f"TradingView-style: <b>локальный теханализ MA/RSI/MACD/объёмов без платного TradingView API</b>\n\n"
         "Когда режим ON, авто-скан и автоторговля стоят на паузе. "
-        "Ручной ввод <code>eth profit</code> запускает глубокий анализ ETH по год/месяц/неделя/день/4h/1h/15m/5m, "
+        f"Ручной ввод <code>{command}</code> запускает глубокий анализ {coin} по год/месяц/неделя/день/4h/1h/15m/5m, "
         "истории похожих паттернов, сессиям Азии/Америки, объёмам, funding, тренду, поддержке/сопротивлению, "
-        "после чего бот выдаёт план LONG/SHORT. Это техническая оценка, не гарантия прибыли."
+        "бесплатному новостному фону и TradingView-style теханализу. Бот выдаёт план LONG/SHORT. Это техническая оценка, не гарантия прибыли."
     )
+
+
+def eth_profit_status_text() -> str:
+    return profit_status_text("ETH")
+
+
+def btc_profit_status_text() -> str:
+    return profit_status_text("BTC")
 
 
 def clamp_float(value: float, low: float, high: float) -> float:
@@ -6289,65 +6388,232 @@ def similar_pattern_stats(candles: Optional[list[dict[str, float]]], horizon: in
     }
 
 
+async def fetch_profit_news_background(session: aiohttp.ClientSession, coin: str) -> dict[str, Any]:
+    """Бесплатный новостной фон через RSS/public источники.
+
+    CryptoPanic API больше не требуется. Новости используются только как
+    фильтр риска и мягкое усиление LONG/SHORT, чтобы не ломать технический
+    анализ запаздывающими заголовками.
+    """
+    if not ETH_PROFIT_NEWS_ENABLED:
+        return {"score": 0.0, "text": "новостной фон отключён в настройках, фактор нейтральный"}
+
+    coin = coin.upper()
+    positive_words = {
+        "bull", "bullish", "surge", "rally", "etf", "inflow", "upgrade", "growth", "record",
+        "accumulate", "approval", "staking", "adoption", "breakout", "institutional", "pump",
+        "positive", "gain", "rebound", "all-time", "ath", "launch", "partnership", "buy",
+        "flows", "optimism", "demand", "support", "recovery",
+    }
+    negative_words = {
+        "bear", "bearish", "hack", "outflow", "selloff", "lawsuit", "ban", "crash", "dump",
+        "liquidation", "exploit", "sec", "fine", "delay", "rejected", "negative", "loss",
+        "plunge", "drop", "scam", "phishing", "stolen", "investigation", "fraud", "risk",
+        "tariff", "war", "fear", "panic", "withdrawal", "bankruptcy",
+    }
+    if coin == "BTC":
+        coin_terms = ("btc", "bitcoin", "satoshi", "spot bitcoin", "bitcoin etf")
+        extra_queries = [
+            "https://news.google.com/rss/search?q=Bitcoin%20BTC%20ETF%20crypto&hl=en-US&gl=US&ceid=US:en",
+            "https://cointelegraph.com/rss/tag/bitcoin",
+        ]
+    else:
+        coin_terms = ("eth", "ethereum", "ether", "vitalik", "staking", "l2", "layer 2", "erc-20", "ethereum etf")
+        extra_queries = [
+            "https://news.google.com/rss/search?q=Ethereum%20ETH%20ETF%20staking%20crypto&hl=en-US&gl=US&ceid=US:en",
+            "https://cointelegraph.com/rss/tag/ethereum",
+        ]
+    macro_terms = ("fed", "cpi", "sec", "etf", "binance", "mexc", "bybit", "liquidation", "crypto")
+
+    def clean_title(value: str) -> str:
+        value = html.unescape(str(value or ""))
+        value = re.sub(r"<[^>]+>", " ", value)
+        value = re.sub(r"\s+", " ", value).strip()
+        return value
+
+    def score_titles(titles: list[str]) -> tuple[int, int, float, bool]:
+        pos = neg = 0
+        high_risk = False
+        for title in titles:
+            low = title.lower()
+            if any(w in low for w in positive_words):
+                pos += 1
+            if any(w in low for w in negative_words):
+                neg += 1
+            if any(w in low for w in ("hack", "exploit", "crash", "liquidation", "lawsuit", "ban", "bankruptcy", "panic")):
+                high_risk = True
+        # Новости должны быть мягким фильтром, а не главным предсказателем.
+        score = clamp_float((pos - neg) * 1.8, -12, 12)
+        if high_risk and neg >= pos:
+            score = min(score, -6.0)
+        return pos, neg, score, high_risk
+
+    all_titles: list[str] = []
+    source_hits: dict[str, int] = {}
+    urls = []
+    for url in list(PROFIT_NEWS_RSS_URLS) + extra_queries:
+        if url and url not in urls:
+            urls.append(url)
+
+    for url in urls[:10]:
+        try:
+            async with session.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0 Profit Bot RSS"}) as response:
+                if response.status != 200:
+                    continue
+                raw_text = await response.text(errors="ignore")
+            blocks = re.findall(r"<(?:item|entry)\b[\s\S]*?</(?:item|entry)>", raw_text, flags=re.IGNORECASE)[:45]
+            host = re.sub(r"^https?://", "", url).split("/")[0].replace("www.", "")
+            for block in blocks:
+                match = re.search(r"<title[^>]*>([\s\S]*?)</title>", block, flags=re.IGNORECASE)
+                if not match:
+                    continue
+                title = clean_title(match.group(1))
+                if not title:
+                    continue
+                low = title.lower()
+                if any(term in low for term in coin_terms) or any(term in low for term in macro_terms):
+                    all_titles.append(title)
+                    source_hits[host] = source_hits.get(host, 0) + 1
+        except Exception:
+            logging.debug("Profit RSS news fetch failed: %s", url, exc_info=True)
+
+    unique_titles: list[str] = []
+    seen: set[str] = set()
+    for title in all_titles:
+        key = title.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_titles.append(title)
+
+    if not unique_titles:
+        return {"score": 0.0, "text": "RSS/public новости не получены, фактор нейтральный"}
+
+    pos, neg, score, high_risk = score_titles(unique_titles[:50])
+    preview = "; ".join(unique_titles[:3])
+    source_text = "+".join(list(source_hits.keys())[:4]) if source_hits else "RSS/public"
+    mood = "позитивный" if score > 2 else "негативный" if score < -2 else "смешанный/нейтральный"
+    risk_text = "; ⚠️ высокий новостной риск" if high_risk else ""
+    return {
+        "score": score,
+        "text": f"{source_text}: фон {mood}; позитив {pos}, негатив {neg}{risk_text}; {preview}",
+        "high_risk": high_risk,
+    }
+
+
 async def fetch_eth_news_background(session: aiohttp.ClientSession) -> dict[str, Any]:
-    if not ETH_PROFIT_NEWS_ENABLED or not CRYPTOPANIC_TOKEN:
-        return {"score": 0.0, "text": "новостной фон не подключён: нет CRYPTOPANIC_TOKEN, фактор нейтральный"}
-    url = "https://cryptopanic.com/api/developer/v2/posts/"
-    params = {"auth_token": CRYPTOPANIC_TOKEN, "currencies": "ETH", "public": "true"}
-    try:
-        async with session.get(url, params=params, timeout=10) as response:
-            if response.status != 200:
-                return {"score": 0.0, "text": f"новости недоступны HTTP {response.status}, фактор нейтральный"}
-            raw = await response.json()
-    except Exception:
-        logging.exception("ETH Profit news fetch failed")
-        return {"score": 0.0, "text": "новости не получены, фактор нейтральный"}
-    posts = raw.get("results") or []
-    positive_words = {"bull", "bullish", "surge", "rally", "etf", "inflow", "upgrade", "growth", "record", "accumulate", "approval"}
-    negative_words = {"bear", "bearish", "hack", "outflow", "selloff", "lawsuit", "ban", "crash", "dump", "liquidation", "exploit"}
-    pos = neg = 0
-    titles = []
-    for post in posts[:20]:
-        title = str(post.get("title") or "")
-        low = title.lower()
-        if any(w in low for w in positive_words):
-            pos += 1
-        if any(w in low for w in negative_words):
-            neg += 1
-        if title and len(titles) < 3:
-            titles.append(title[:90])
-    score = clamp_float((pos - neg) * 2.5, -8, 8)
-    text = f"новости ETH: позитив {pos}, негатив {neg}; " + ("; ".join(titles) if titles else "заголовков мало")
-    return {"score": score, "text": text}
+    # Совместимость со старым именем функции.
+    return await fetch_profit_news_background(session, "ETH")
+
+
+def tradingview_style_summary(snapshots: list[dict[str, Any]]) -> dict[str, Any]:
+    """Локальный аналог сводки TradingView Technicals.
+
+    Важно: это не обращение к закрытому/платному TradingView API. Бот считает
+    похожую сводку сам по EMA/RSI/MACD/наклону/объёму на уже полученных свечах
+    и мягко усиливает LONG/SHORT.
+    """
+    usable = [s for s in snapshots if s.get("ok")]
+    if not usable:
+        return {"score": 0.0, "text": "нет данных для TradingView-style сводки"}
+    buy = sell = neutral = 0
+    weighted = 0.0
+    weight_sum = 0.0
+    for snap in usable:
+        score = float(snap.get("score") or 0.0)
+        weight = float(snap.get("weight") or 1.0)
+        weighted += score * weight
+        weight_sum += weight
+        if score >= 18:
+            buy += 1
+        elif score <= -18:
+            sell += 1
+        else:
+            neutral += 1
+    avg_score = weighted / max(1e-9, weight_sum)
+    boost = clamp_float(avg_score * 0.22, -14, 14)
+    if buy >= sell + 3:
+        action = "STRONG BUY / усиление LONG"
+    elif buy > sell:
+        action = "BUY / умеренное усиление LONG"
+    elif sell >= buy + 3:
+        action = "STRONG SELL / усиление SHORT"
+    elif sell > buy:
+        action = "SELL / умеренное усиление SHORT"
+    else:
+        action = "NEUTRAL / без усиления"
+    return {
+        "score": boost,
+        "text": f"{action}; BUY {buy}, SELL {sell}, NEUTRAL {neutral}; score {boost:+.1f}",
+        "buy": buy,
+        "sell": sell,
+        "neutral": neutral,
+    }
+
+def eth_profit_levels(current_price: float, candles_15m: list[dict[str, float]], candles_1h: list[dict[str, float]]) -> dict[str, float]:
+    """Возвращает разнесённые LONG/SHORT уровни, чтобы они не совпадали с текущей ценой.
+
+    LONG-точка ищется ниже рынка около поддержки, SHORT-точка — выше рынка около сопротивления.
+    Если ближайший уровень слишком близко к цене, добавляется минимальная дистанция от ATR/цены.
+    """
+    recent_15 = candles_15m[-160:] if candles_15m else []
+    recent_1h = candles_1h[-120:] if candles_1h else []
+    highs_15 = [float(c["high"]) for c in recent_15]
+    lows_15 = [float(c["low"]) for c in recent_15]
+    closes_15 = [float(c["close"]) for c in recent_15]
+    atrs = calculate_atr(highs_15, lows_15, closes_15, 14) if len(closes_15) >= 20 else []
+    atr = atrs[-1] if atrs and atrs[-1] is not None else current_price * 0.006
+    min_gap = max(current_price * 0.0015, atr * 0.25)
+
+    all_lows = [float(c["low"]) for c in recent_15 + recent_1h if float(c.get("low") or 0) > 0]
+    all_highs = [float(c["high"]) for c in recent_15 + recent_1h if float(c.get("high") or 0) > 0]
+
+    support_candidates = [v for v in all_lows if v <= current_price - min_gap]
+    resistance_candidates = [v for v in all_highs if v >= current_price + min_gap]
+
+    support = max(support_candidates) if support_candidates else current_price - max(current_price * 0.003, atr * 0.60)
+    resistance = min(resistance_candidates) if resistance_candidates else current_price + max(current_price * 0.003, atr * 0.60)
+
+    support = min(support, current_price - min_gap)
+    resistance = max(resistance, current_price + min_gap)
+    if resistance - support < min_gap * 2.0:
+        support = current_price - min_gap
+        resistance = current_price + min_gap
+
+    return {
+        "support": support,
+        "resistance": resistance,
+        "long_entry": support,
+        "short_entry": resistance,
+        "atr": atr,
+        "min_gap": min_gap,
+    }
 
 
 def eth_trade_plan(entry: float, side: str, candles_15m: list[dict[str, float]], candles_1h: list[dict[str, float]], probability: float, funding_rate_pct: Optional[float]) -> dict[str, Any]:
-    highs = [float(c["high"]) for c in candles_15m[-120:]]
-    lows = [float(c["low"]) for c in candles_15m[-120:]]
-    closes = [float(c["close"]) for c in candles_15m[-120:]]
-    atrs = calculate_atr(highs, lows, closes, 14)
-    atr = atrs[-1] if atrs and atrs[-1] is not None else max(entry * 0.006, 1e-9)
-    levels_15 = nearest_levels(candles_15m, 120)
-    levels_1h = nearest_levels(candles_1h, 160)
-    support = max(float(levels_15["support"]), float(levels_1h["support"]))
-    resistance = min(float(levels_15["resistance"]), float(levels_1h["resistance"]))
+    levels = eth_profit_levels(entry, candles_15m, candles_1h)
+    atr = max(float(levels["atr"]), entry * 0.002)
+    support = float(levels["support"])
+    resistance = float(levels["resistance"])
     min_risk = max(entry * 0.004, atr * 0.9)
+
     if side == "LONG":
-        ideal_entry = max(support, entry - atr * 0.35)
+        ideal_entry = float(levels["long_entry"])
         stop = min(ideal_entry - min_risk, support - atr * 0.35)
         if stop <= 0:
             stop = ideal_entry * 0.99
         risk = max(ideal_entry - stop, entry * 0.004)
         tps = [ideal_entry + risk * 1.5, ideal_entry + risk * 2.5, ideal_entry + risk * 3.5]
-        if resistance > ideal_entry:
+        if resistance > ideal_entry + risk:
             tps[0] = max(tps[0], min(resistance, ideal_entry + risk * 2.0))
     else:
-        ideal_entry = min(resistance, entry + atr * 0.35) if resistance > 0 else entry + atr * 0.35
+        ideal_entry = float(levels["short_entry"])
         stop = max(ideal_entry + min_risk, resistance + atr * 0.35)
         risk = max(stop - ideal_entry, entry * 0.004)
         tps = [max(ideal_entry - risk * 1.5, entry * 0.0001), max(ideal_entry - risk * 2.5, entry * 0.0001), max(ideal_entry - risk * 3.5, entry * 0.0001)]
-        if support > 0 and support < ideal_entry:
+        if support > 0 and support < ideal_entry - risk:
             tps[0] = min(tps[0], max(support, ideal_entry - risk * 2.0))
+
     market_rr = risk_reward(entry, stop, tps[0], side)
     ideal_rr = risk_reward(ideal_entry, stop, tps[0], side)
     stop_pct = abs((ideal_entry - stop) / ideal_entry * 100.0) if ideal_entry > 0 else 0.0
@@ -6383,7 +6649,9 @@ def eth_trade_plan(entry: float, side: str, candles_15m: list[dict[str, float]],
         "notional": notional,
         "leverage": leverage,
         "recommended_margin": recommended_margin,
-        "roundtrip_cost_pct": round_cost.get("total_pct", 0.0),
+        "roundtrip_cost_pct": round_cost.get("total_cost_pct", round_cost.get("total_pct", 0.0)),
+        "support": support,
+        "resistance": resistance,
     }
 
 
@@ -6403,14 +6671,17 @@ def build_eth_profit_text(data: dict[str, Any]) -> str:
     primary_1d = data["primary_1d"]
     support = data["support"]
     resistance = data["resistance"]
+    coin_label = str(data.get("coin_label") or "ETH")
+    title_prefix = str(data.get("title_prefix") or "💎")
+    tv = data.get("tradingview") or {"score": 0.0, "text": "нет данных"}
     mode = "✅ вход можно рассматривать" if max(long_probability, short_probability) >= ETH_PROFIT_MIN_TRADE_PROBABILITY else "⏳ лучше ждать, перевес слабый"
     market_allowed = plan.get("market_rr", 0.0) >= 1.2 and max(long_probability, short_probability) >= ETH_PROFIT_STRONG_TRADE_PROBABILITY
     market_text = "допустим малым объёмом" if market_allowed else "лучше ждать идеальную точку/откат"
     lines = [
-        "<b>💎 ETH PROFIT — глубокий анализ ETH</b>",
+        f"<b>{html.escape(title_prefix)} {html.escape(coin_label)} PROFIT — глубокий анализ {html.escape(coin_label)}</b>",
         f"Версия бота: <b>{html.escape(BOT_VERSION)}</b>",
         f"Биржа: <b>{html.escape(exchange_label())}</b>",
-        f"Текущая цена ETH: <b>{html.escape(fmt_price(current_price))}</b>",
+        f"Текущая цена {html.escape(coin_label)}: <b>{html.escape(fmt_price(current_price))}</b>",
         "",
         "<b>Итог после всех факторов</b>",
         f"Рекомендация: <b>{html.escape(side)}</b> — {mode}",
@@ -6419,8 +6690,9 @@ def build_eth_profit_text(data: dict[str, Any]) -> str:
         f"Вход по рынку: <b>{market_text}</b>",
         "",
         "<b>План сделки</b>",
-        f"Рекомендуемая точка LONG: <b>{html.escape(fmt_price(data['long_entry']))}</b>",
-        f"Рекомендуемая точка SHORT: <b>{html.escape(fmt_price(data['short_entry']))}</b>",
+        f"Рекомендуемая точка LONG: <b>{html.escape(fmt_price(data['long_entry']))}</b> — ниже рынка/от поддержки",
+        f"Рекомендуемая точка SHORT: <b>{html.escape(fmt_price(data['short_entry']))}</b> — выше рынка/от сопротивления",
+        f"Выбранный план: <b>{html.escape(side)}</b>",
         f"Выбранный вход: <b>{html.escape(fmt_price(plan['entry_ideal']))}</b>",
         f"Вход по рынку: <b>{html.escape(fmt_price(plan['entry_market']))}</b>",
         f"Стоп: <b>{html.escape(fmt_price(plan['stop']))}</b> ({plan['stop_pct']:.2f}% риска от идеального входа)",
@@ -6452,7 +6724,8 @@ def build_eth_profit_text(data: dict[str, Any]) -> str:
         f"• Поддержка: <b>{html.escape(fmt_price(support))}</b> ({pct_from_entry(support, current_price):+.2f}% от цены)",
         f"• Сопротивление: <b>{html.escape(fmt_price(resistance))}</b> ({pct_from_entry(resistance, current_price):+.2f}% от цены)",
         f"• Funding: {html.escape(funding_text)}",
-        f"• Новостной фон: {html.escape(news['text'])}",
+        f"• Новостной фон RSS/public: {html.escape(news['text'])}",
+        f"• TradingView-style теханализ: {html.escape(tv['text'])}",
         "",
         "<b>Прогноз цены по всем ТФ</b>",
         f"• Ближайший сценарий: <b>{html.escape(data['forecast_text'])}</b>",
@@ -6488,8 +6761,8 @@ async def fetch_eth_profit_funding_rate_pct(exchange_name: str, symbol: str) -> 
                 pass
     return None
 
-async def build_eth_profit_analysis() -> str:
-    symbol = ETH_PROFIT_SYMBOL
+async def build_profit_analysis(symbol: str, coin_label: str, title_prefix: str) -> str:
+    coin_label = coin_label.upper()
     timeout = aiohttp.ClientTimeout(total=45)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         tasks = {
@@ -6515,14 +6788,14 @@ async def build_eth_profit_analysis() -> str:
         if candles_map.get("1h"):
             candles_map["day"] = (candles_map.get("day") or candles_map["1h"][-48:])
         funding_rate_pct = await fetch_eth_profit_funding_rate_pct(MARKET_DATA_PROVIDER, symbol)
-        news = await fetch_eth_news_background(session)
+        news = await fetch_profit_news_background(session, coin_label)
 
     candles_15m = candles_map.get("15m") or candles_map.get("1h") or []
     candles_1h = candles_map.get("1h") or candles_map.get("4h") or candles_15m
     candles_4h = candles_map.get("4h") or candles_1h
     candles_1d = candles_map.get("year") or candles_map.get("month") or candles_4h
     if not candles_15m or len(candles_15m) < 80:
-        raise RuntimeError("не получил достаточно свечей ETH для ETH Profit анализа")
+        raise RuntimeError(f"не получил достаточно свечей {coin_label} для Profit анализа")
     current_price = float(candles_15m[-1]["close"])
     snapshots = [
         timeframe_snapshot("Годовой", "1d/365", candles_map.get("year"), 1.0),
@@ -6542,6 +6815,7 @@ async def build_eth_profit_analysis() -> str:
     pattern_1h = similar_pattern_stats(candles_map.get("1h"), 12, "1h горизонт ~12ч")
     primary_4h = analyze_primary_trend(candles_4h, "4h") if candles_4h else None
     primary_1d = analyze_primary_trend(candles_1d, "1d") if candles_1d else None
+    tv = tradingview_style_summary(snapshots)
     trend_score = 0.0
     for tr, weight in ((primary_4h, 1.4), (primary_1d, 1.0)):
         if tr:
@@ -6553,31 +6827,43 @@ async def build_eth_profit_analysis() -> str:
         # Положительный funding = longs pay shorts, это маленький контр-вес LONG.
         funding_score = clamp_float(-float(funding_rate_pct) * 80.0, -6, 6)
         funding_text = f"{funding_rate_pct:+.4f}% — {'давит на LONG' if funding_rate_pct > 0 else 'давит на SHORT' if funding_rate_pct < 0 else 'нейтрально'}"
-    total_score = base_score + float(session.get("score") or 0.0) + float(pattern_15.get("score") or 0.0) + float(pattern_1h.get("score") or 0.0) + trend_score + funding_score + float(news.get("score") or 0.0)
+    total_score = (
+        base_score
+        + float(session.get("score") or 0.0)
+        + float(pattern_15.get("score") or 0.0)
+        + float(pattern_1h.get("score") or 0.0)
+        + trend_score
+        + funding_score
+        + float(news.get("score") or 0.0)
+        + float(tv.get("score") or 0.0)
+    )
     total_score = clamp_float(total_score, -90, 90)
     long_probability = clamp_float(50.0 + total_score * 0.45, 5, 95)
     side = "LONG" if long_probability >= 50 else "SHORT"
     probability = max(long_probability, 100.0 - long_probability)
-    levels_15 = nearest_levels(candles_15m, 160)
-    levels_1h = nearest_levels(candles_1h, 160)
-    support = max(float(levels_15["support"]), float(levels_1h["support"]))
-    resistance = min(float(levels_15["resistance"]), float(levels_1h["resistance"]))
-    if resistance <= current_price:
-        resistance = max(float(levels_15["resistance"]), float(levels_1h["resistance"]), current_price * 1.006)
-    if support >= current_price:
-        support = min(float(levels_15["support"]), float(levels_1h["support"]), current_price * 0.994)
-    long_entry = max(support, current_price * 0.997)
-    short_entry = min(resistance, current_price * 1.003)
+    levels = eth_profit_levels(current_price, candles_15m, candles_1h)
+    support = float(levels["support"])
+    resistance = float(levels["resistance"])
+    long_entry = float(levels["long_entry"])
+    short_entry = float(levels["short_entry"])
     plan = eth_trade_plan(current_price, side, candles_15m, candles_1h, probability, funding_rate_pct)
-    expected_move = (float(pattern_15.get("avg_forward") or 0.0) + float(pattern_1h.get("avg_forward") or 0.0)) / 2.0
-    if expected_move == 0:
-        expected_move = total_score / 120.0
-    forecast_mid = current_price * (1.0 + expected_move / 100.0)
-    forecast_span = max(current_price * 0.003, abs(forecast_mid - current_price) * 0.8)
-    forecast_low = forecast_mid - forecast_span
-    forecast_high = forecast_mid + forecast_span
-    forecast_text = "рост/лонг-преимущество" if total_score > 8 else "снижение/шорт-преимущество" if total_score < -8 else "флэт, вход только от уровня"
+
+    # Прогнозная зона всегда строится в сторону сценария.
+    if abs(total_score) <= 8:
+        forecast_text = "флэт, вход только от уровня"
+        forecast_low = min(support, resistance)
+        forecast_high = max(support, resistance)
+    elif side == "LONG":
+        forecast_text = "рост/лонг-преимущество"
+        forecast_low = min(float(plan["tps"][0]), float(plan["tps"][1]))
+        forecast_high = max(float(plan["tps"][0]), float(plan["tps"][1]))
+    else:
+        forecast_text = "снижение/шорт-преимущество"
+        forecast_low = min(float(plan["tps"][0]), float(plan["tps"][1]))
+        forecast_high = max(float(plan["tps"][0]), float(plan["tps"][1]))
     data = {
+        "coin_label": coin_label,
+        "title_prefix": title_prefix,
         "snapshots": snapshots,
         "current_price": current_price,
         "long_probability": long_probability,
@@ -6585,6 +6871,7 @@ async def build_eth_profit_analysis() -> str:
         "plan": plan,
         "funding_text": funding_text,
         "news": news,
+        "tradingview": tv,
         "session": session,
         "pattern_15m": pattern_15,
         "pattern_1h": pattern_1h,
@@ -6600,6 +6887,13 @@ async def build_eth_profit_analysis() -> str:
     }
     return build_eth_profit_text(data)
 
+
+async def build_eth_profit_analysis() -> str:
+    return await build_profit_analysis(ETH_PROFIT_SYMBOL, "ETH", "💎")
+
+
+async def build_btc_profit_analysis() -> str:
+    return await build_profit_analysis(BTC_PROFIT_SYMBOL, "BTC", "₿")
 
 def split_telegram_text(text: str, limit: int = 3900) -> list[str]:
     if len(text) <= limit:
@@ -6617,30 +6911,51 @@ def split_telegram_text(text: str, limit: int = 3900) -> list[str]:
     return parts
 
 
-async def answer_eth_profit_analysis(message: Message) -> None:
-    if not ETH_PROFIT_MODE_ENABLED:
+async def answer_profit_analysis(message: Message, kind: str) -> None:
+    kind = kind.upper()
+    if kind == "BTC":
+        enabled = BTC_PROFIT_MODE_ENABLED
+        title = "BTC Profit"
+        command = "btc profit"
+        builder = build_btc_profit_analysis
+    else:
+        enabled = ETH_PROFIT_MODE_ENABLED
+        title = "ETH Profit"
+        command = "eth profit"
+        builder = build_eth_profit_analysis
+    if not enabled:
         await message.answer(
-            "💎 ETH Profit сейчас выключен. Включи его в /settings → 💎 ETH Profit или командой /eth_profit, затем напиши <code>eth profit</code>.",
+            f"{html.escape(title)} сейчас выключен. Включи его в /settings или командой /{kind.lower()}_profit, затем напиши <code>{command}</code>.",
             reply_markup=keyboard,
         )
         return
-    progress = await message.answer("🔎 ETH Profit: собираю 1y/1M/1W/1D/4h/1h/15m/5m, историю паттернов, сессии, объёмы, funding и новости...")
+    progress = await message.answer(
+        f"🔎 {html.escape(title)}: собираю 1y/1M/1W/1D/4h/1h/15m/5m, историю паттернов, сессии, объёмы, funding, RSS/public новости и TradingView-style теханализ..."
+    )
     try:
-        text = await build_eth_profit_analysis()
+        text = await builder()
     except asyncio.TimeoutError:
-        logging.exception("ETH Profit timeout")
-        await safe_edit(progress, "⏳ ETH Profit: биржа долго отвечает. Попробуй ещё раз.")
+        logging.exception("%s timeout", title)
+        await safe_edit(progress, f"⏳ {html.escape(title)}: биржа долго отвечает. Попробуй ещё раз.")
         return
     except Exception as exc:
-        logging.exception("ETH Profit analysis failed")
-        await safe_edit(progress, "⚠️ ETH Profit: ошибка анализа. Подробности в Railway Logs.")
+        logging.exception("%s analysis failed", title)
+        await safe_edit(progress, f"⚠️ {html.escape(title)}: ошибка анализа. Подробности в Railway Logs.")
         await message.answer(f"Ошибка: <code>{html.escape(str(exc))}</code>")
         return
-    await safe_edit(progress, "✅ ETH Profit анализ готов")
+    await safe_edit(progress, f"✅ {html.escape(title)} анализ готов")
     parts = split_telegram_text(text)
     for index, part in enumerate(parts):
         await message.answer(part, reply_markup=keyboard if index == len(parts) - 1 else None)
         await asyncio.sleep(0.05)
+
+
+async def answer_eth_profit_analysis(message: Message) -> None:
+    await answer_profit_analysis(message, "ETH")
+
+
+async def answer_btc_profit_analysis(message: Message) -> None:
+    await answer_profit_analysis(message, "BTC")
 
 
 # ---------- Telegram handlers ----------
@@ -6657,7 +6972,7 @@ async def cmd_start(message: Message) -> None:
         "Привет! Я Telegram-бот для автоматических торговых сигналов.\n\n"
         "Ты подписан на сигналы. Бот сам сканирует рынок и отправляет сетапы "
         f"с проходимостью от {MIN_SIGNAL_PROBABILITY}% и выше.\n\n"
-        "Команды: /help, /status, /settings, /scan, /ping, /super_deal, /btc_eth, /naklonki, /improvements, /polishing, /eth_profit, /journal, /id, /stop",
+        "Команды: /help, /status, /settings, /scan, /ping, /super_deal, /btc_eth, /naklonki, /improvements, /polishing, /eth_profit, /btc_profit, /journal, /id, /stop",
         reply_markup=keyboard,
     )
 
@@ -6757,6 +7072,7 @@ async def cmd_status(message: Message) -> None:
         f"Улучшения торговли: <b>{html.escape(trading_improvements_label())}</b>\n"
         f"Полировка торговли: <b>{html.escape(trade_polishing_label())}</b>\n"
         f"ETH Profit: <b>{html.escape(eth_profit_label())}</b>\n"
+        f"BTC Profit: <b>{html.escape(btc_profit_label())}</b>\n"
         f"Автоторговля: <b>{html.escape(autotrade_label())}</b>\n"
         f"API текущей биржи: <b>{'есть' if has_api_keys(MARKET_DATA_PROVIDER) else 'нет'}</b>\n"
         f"Маржа/объём сделки: <b>${TRADE_MARGIN_USDT:g}</b>\n"
@@ -6957,15 +7273,32 @@ async def cmd_polishing(message: Message) -> None:
 
 @dp.message(Command("eth_profit"))
 async def cmd_eth_profit(message: Message) -> None:
-    global ETH_PROFIT_MODE_ENABLED
+    global ETH_PROFIT_MODE_ENABLED, BTC_PROFIT_MODE_ENABLED
     if not is_admin(message.from_user.id):
         await message.answer("ETH Profit доступен только админу.")
         return
     parts = (message.text or "").split()
     if len(parts) > 1 and parts[1].lower() in {"on", "off", "вкл", "выкл"}:
         ETH_PROFIT_MODE_ENABLED = parts[1].lower() in {"on", "вкл"}
+        if ETH_PROFIT_MODE_ENABLED:
+            BTC_PROFIT_MODE_ENABLED = False
         save_runtime_settings()
     await message.answer(eth_profit_status_text(), reply_markup=eth_profit_keyboard())
+
+
+@dp.message(Command("btc_profit"))
+async def cmd_btc_profit(message: Message) -> None:
+    global ETH_PROFIT_MODE_ENABLED, BTC_PROFIT_MODE_ENABLED
+    if not is_admin(message.from_user.id):
+        await message.answer("BTC Profit доступен только админу.")
+        return
+    parts = (message.text or "").split()
+    if len(parts) > 1 and parts[1].lower() in {"on", "off", "вкл", "выкл"}:
+        BTC_PROFIT_MODE_ENABLED = parts[1].lower() in {"on", "вкл"}
+        if BTC_PROFIT_MODE_ENABLED:
+            ETH_PROFIT_MODE_ENABLED = False
+        save_runtime_settings()
+    await message.answer(btc_profit_status_text(), reply_markup=btc_profit_keyboard())
 
 
 @dp.message(Command("journal"))
@@ -7202,7 +7535,7 @@ async def settings_callback(callback: CallbackQuery) -> None:
     global AUTO_SIGNALS_ENABLED, SIGNAL_TIMEFRAME, MIN_SIGNAL_PROBABILITY, SCAN_INTERVAL_SECONDS, SIGNAL_COOLDOWN_MINUTES, MAX_SIGNALS_PER_SCAN, MARKET_DATA_PROVIDER
     global AUTO_TRADE_MODE, TRADE_MARGIN_USDT, AUTO_CLOSE_TP_INDEX, SMART_ALGORITHM_ENABLED
     global NEURAL_OPTIMIZER_ENABLED, SUPER_DEAL_ENABLED, BTC_ETH_ONLY_MODE_ENABLED, SLOPE_LEVELS_ENABLED, SLOPE_LEVELS_MODE, TRADING_IMPROVEMENTS_ENABLED, TRADE_POLISHING_ENABLED
-    global ETH_PROFIT_MODE_ENABLED
+    global ETH_PROFIT_MODE_ENABLED, BTC_PROFIT_MODE_ENABLED
     global TREND_FILTER_ENABLED, TREND_TIMEFRAME
 
     if callback.from_user is None or not is_admin(callback.from_user.id):
@@ -7406,10 +7739,21 @@ async def settings_callback(callback: CallbackQuery) -> None:
         await callback.answer()
         return
 
+    if data == "settings:btc_profit":
+        await message.edit_text(btc_profit_status_text(), reply_markup=btc_profit_keyboard())
+        await callback.answer()
+        return
+
     if data == "settings:run_eth_profit":
         await callback.answer("Запускаю ETH Profit")
         await message.answer("🔎 Запускаю глубокий ETH Profit анализ...")
         await answer_eth_profit_analysis(message)
+        return
+
+    if data == "settings:run_btc_profit":
+        await callback.answer("Запускаю BTC Profit")
+        await message.answer("🔎 Запускаю глубокий BTC Profit анализ...")
+        await answer_btc_profit_analysis(message)
         return
 
     if data == "settings:journal":
@@ -7692,9 +8036,24 @@ async def settings_callback(callback: CallbackQuery) -> None:
         value = data.split(":", 2)[2].lower()
         if value in {"on", "off"}:
             ETH_PROFIT_MODE_ENABLED = value == "on"
+            if ETH_PROFIT_MODE_ENABLED:
+                BTC_PROFIT_MODE_ENABLED = False
             save_runtime_settings()
             await message.edit_text(settings_menu_text(), reply_markup=settings_keyboard())
             await callback.answer("ETH Profit включён: авто-скан и автоторговля на паузе" if ETH_PROFIT_MODE_ENABLED else "ETH Profit выключен: обычный режим")
+        else:
+            await callback.answer("Неверное значение", show_alert=True)
+        return
+
+    if data.startswith("settings:set_btc_profit:"):
+        value = data.split(":", 2)[2].lower()
+        if value in {"on", "off"}:
+            BTC_PROFIT_MODE_ENABLED = value == "on"
+            if BTC_PROFIT_MODE_ENABLED:
+                ETH_PROFIT_MODE_ENABLED = False
+            save_runtime_settings()
+            await message.edit_text(settings_menu_text(), reply_markup=settings_keyboard())
+            await callback.answer("BTC Profit включён: авто-скан и автоторговля на паузе" if BTC_PROFIT_MODE_ENABLED else "BTC Profit выключен: обычный режим")
         else:
             await callback.answer("Неверное значение", show_alert=True)
         return
@@ -7772,7 +8131,7 @@ async def cmd_scan(message: Message, bot: Bot) -> None:
         await message.answer("Эта команда доступна только админу.")
         return
     if eth_profit_blocks_trading():
-        await message.answer("💎 ETH Profit включён: авто-скан временно выключен. Напиши <code>eth profit</code> для глубокого анализа ETH или выключи режим в /eth_profit.")
+        await message.answer(f"{html.escape(active_profit_mode_name())} включён: авто-скан временно выключен. Напиши <code>{html.escape(active_profit_command())}</code> для глубокого анализа или выключи режим в настройках.")
         return
     progress = await message.answer("🧪 Запускаю ручной авто-скан рынка...")
     try:
@@ -7795,7 +8154,7 @@ async def cmd_signal(message: Message, command: CommandObject, bot: Bot) -> None
         await message.answer("Эта команда доступна только админу.")
         return
     if eth_profit_blocks_trading():
-        await message.answer("💎 ETH Profit включён: ручная отправка обычных сигналов временно выключена. Напиши <code>eth profit</code> или выключи режим в /eth_profit.")
+        await message.answer(f"{html.escape(active_profit_mode_name())} включён: ручная отправка обычных сигналов временно выключена. Напиши <code>{html.escape(active_profit_command())}</code> или выключи режим в настройках.")
         return
     if not command.args:
         await message.answer("Пример:\n<code>/signal TRX LONG 82 0.3235 0.3195 0.3265 0.3290 0.3320 Лонг от поддержки</code>")
@@ -7947,6 +8306,11 @@ async def button_eth_profit(message: Message) -> None:
     await cmd_eth_profit(message)
 
 
+@dp.message(F.text == "₿ BTC Profit")
+async def button_btc_profit(message: Message) -> None:
+    await cmd_btc_profit(message)
+
+
 @dp.message(F.text == "💰 Автоторговля")
 async def button_autotrade(message: Message) -> None:
     if not is_admin(message.from_user.id):
@@ -7978,10 +8342,13 @@ async def fallback(message: Message) -> None:
     if normalized_text in {"eth profit", "эфир profit", "ethprofit"}:
         await answer_eth_profit_analysis(message)
         return
+    if normalized_text in {"btc profit", "биткоин profit", "bitcoin profit", "btcprofit"}:
+        await answer_btc_profit_analysis(message)
+        return
     if eth_profit_blocks_trading():
         await message.answer(
-            "💎 ETH Profit включён: обычный ручной скан монет и авто-функции на паузе. "
-            "Напиши <code>eth profit</code> для полного анализа ETH или выключи режим в /eth_profit.",
+            f"{html.escape(active_profit_mode_name())} включён: обычный ручной скан монет и авто-функции на паузе. "
+            f"Напиши <code>{html.escape(active_profit_command())}</code> для полного анализа или выключи режим в настройках.",
             reply_markup=keyboard,
         )
         return
