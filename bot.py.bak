@@ -6,7 +6,6 @@ import logging
 import math
 import os
 import re
-import sys
 import time
 import uuid
 import fcntl
@@ -26,7 +25,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BOT_STARTED_AT = time.time()
-BOT_VERSION = "1026"
+BOT_VERSION = "1025"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
@@ -307,36 +306,6 @@ TRADE_MARGIN_OPTIONS = [5, 10, 20, 50, 100, 250]
 AUTO_CLOSE_TP_OPTIONS = [1, 2, 3]
 
 
-def default_runtime_settings() -> dict[str, Any]:
-    return {
-        "AUTO_SIGNALS_ENABLED": True,
-        "MIN_SIGNAL_PROBABILITY": 80,
-        "SIGNAL_TIMEFRAME": "15m",
-        "TREND_FILTER_ENABLED": True,
-        "TREND_TIMEFRAME": "4h",
-        "SCAN_INTERVAL_SECONDS": 600,
-        "SIGNAL_COOLDOWN_MINUTES": 360,
-        "MAX_SIGNALS_PER_SCAN": 3,
-        "MARKET_DATA_PROVIDER": "mexc",
-        "AUTO_TRADE_MODE": "off",
-        "TRADE_MARGIN_USDT": 5.0,
-        "AUTO_CLOSE_TP_INDEX": 1,
-        "SMART_ALGORITHM_ENABLED": False,
-        "NEURAL_OPTIMIZER_ENABLED": False,
-        "SUPER_DEAL_ENABLED": False,
-        "BTC_ETH_ONLY_MODE_ENABLED": False,
-        "SLOPE_LEVELS_ENABLED": False,
-        "SLOPE_LEVELS_MODE": "off",
-        "TRADING_IMPROVEMENTS_ENABLED": False,
-        "TRADE_POLISHING_ENABLED": False,
-        "ETH_PROFIT_MODE_ENABLED": False,
-        "BTC_PROFIT_MODE_ENABLED": False,
-    }
-
-
-DEFAULT_RUNTIME_SETTINGS = default_runtime_settings()
-
-
 def load_runtime_settings() -> dict[str, Any]:
     return load_json(SETTINGS_FILE, {})
 
@@ -401,18 +370,6 @@ def save_runtime_settings() -> None:
         "ETH_PROFIT_MODE_ENABLED": ETH_PROFIT_MODE_ENABLED,
         "BTC_PROFIT_MODE_ENABLED": BTC_PROFIT_MODE_ENABLED,
     })
-
-
-def reset_runtime_settings_to_defaults() -> None:
-    apply_runtime_settings(dict(DEFAULT_RUNTIME_SETTINGS))
-    save_runtime_settings()
-
-
-async def restart_current_process(delay_seconds: float = 1.2) -> None:
-    await asyncio.sleep(delay_seconds)
-    logging.info("Перезапускаю процесс бота по запросу из Telegram")
-    python = sys.executable or "python3"
-    os.execv(python, [python] + sys.argv)
 
 
 def apply_runtime_settings(settings: dict[str, Any]) -> None:
@@ -778,7 +735,6 @@ def settings_keyboard() -> InlineKeyboardMarkup:
         ],
         [InlineKeyboardButton(text="💰 Автоторговля", callback_data="settings:autotrade")],
         [InlineKeyboardButton(text="🔑 API ключи", callback_data="settings:api")],
-        [InlineKeyboardButton(text="🔄 Рестарт", callback_data="settings:restart")],
         [InlineKeyboardButton(text="❌ Закрыть", callback_data="settings:close")],
     ])
 
@@ -1146,7 +1102,7 @@ keyboard = ReplyKeyboardMarkup(
         [KeyboardButton(text="✨ Полировка торговли"), KeyboardButton(text="💎 ETH Profit")],
         [KeyboardButton(text="₿ BTC Profit")],
         [KeyboardButton(text="💰 Автоторговля"), KeyboardButton(text="🔑 API")],
-        [KeyboardButton(text="🔕 Отписаться"), KeyboardButton(text="🔄 Рестарт")],
+        [KeyboardButton(text="🔕 Отписаться")],
         [KeyboardButton(text="🏓 Ping")],
     ],
     resize_keyboard=True,
@@ -6435,9 +6391,9 @@ def similar_pattern_stats(candles: Optional[list[dict[str, float]]], horizon: in
 async def fetch_profit_news_background(session: aiohttp.ClientSession, coin: str) -> dict[str, Any]:
     """Бесплатный новостной фон через RSS/public источники.
 
-    Исправленная версия старается убрать мусор из заголовков, не склеивать
-    источники в одну строку и мягко классифицировать фон как позитивный,
-    негативный или нейтральный.
+    CryptoPanic API больше не требуется. Новости используются только как
+    фильтр риска и мягкое усиление LONG/SHORT, чтобы не ломать технический
+    анализ запаздывающими заголовками.
     """
     if not ETH_PROFIT_NEWS_ENABLED:
         return {"score": 0.0, "text": "новостной фон отключён в настройках, фактор нейтральный"}
@@ -6447,13 +6403,13 @@ async def fetch_profit_news_background(session: aiohttp.ClientSession, coin: str
         "bull", "bullish", "surge", "rally", "etf", "inflow", "upgrade", "growth", "record",
         "accumulate", "approval", "staking", "adoption", "breakout", "institutional", "pump",
         "positive", "gain", "rebound", "all-time", "ath", "launch", "partnership", "buy",
-        "flows", "optimism", "demand", "support", "recovery", "expands", "rise", "rises",
+        "flows", "optimism", "demand", "support", "recovery",
     }
     negative_words = {
         "bear", "bearish", "hack", "outflow", "selloff", "lawsuit", "ban", "crash", "dump",
         "liquidation", "exploit", "sec", "fine", "delay", "rejected", "negative", "loss",
         "plunge", "drop", "scam", "phishing", "stolen", "investigation", "fraud", "risk",
-        "tariff", "war", "fear", "panic", "withdrawal", "bankruptcy", "attack", "uncertainty",
+        "tariff", "war", "fear", "panic", "withdrawal", "bankruptcy",
     }
     if coin == "BTC":
         coin_terms = ("btc", "bitcoin", "satoshi", "spot bitcoin", "bitcoin etf")
@@ -6472,49 +6428,29 @@ async def fetch_profit_news_background(session: aiohttp.ClientSession, coin: str
     def clean_title(value: str) -> str:
         value = html.unescape(str(value or ""))
         value = re.sub(r"<[^>]+>", " ", value)
-        value = re.sub(r"\s+", " ", value).strip(" -—–|:;")
-        value = re.sub(
-            r"\s*(?:[-—–|:]\s*)(?:cointelegraph|coindesk|decrypt|cryptoslate|bitcoin magazine|google news|rss|news).*$",
-            "",
-            value,
-            flags=re.IGNORECASE,
-        ).strip(" -—–|:;")
+        value = re.sub(r"\s+", " ", value).strip()
         return value
 
-    def normalize_source(host: str) -> str:
-        host = re.sub(r"^www\.", "", host.lower())
-        mapping = {
-            "cointelegraph.com": "Cointelegraph",
-            "coindesk.com": "CoinDesk",
-            "decrypt.co": "Decrypt",
-            "cryptoslate.com": "CryptoSlate",
-            "bitcoinmagazine.com": "Bitcoin Magazine",
-            "news.google.com": "Google News",
-        }
-        return mapping.get(host, host)
-
-    def score_titles(titles: list[str]) -> tuple[int, int, int, float, bool]:
-        pos = neg = neutral = 0
+    def score_titles(titles: list[str]) -> tuple[int, int, float, bool]:
+        pos = neg = 0
         high_risk = False
         for title in titles:
             low = title.lower()
-            has_pos = any(w in low for w in positive_words)
-            has_neg = any(w in low for w in negative_words)
-            if has_pos and not has_neg:
+            if any(w in low for w in positive_words):
                 pos += 1
-            elif has_neg and not has_pos:
+            if any(w in low for w in negative_words):
                 neg += 1
-            else:
-                neutral += 1
-            if any(w in low for w in ("hack", "exploit", "crash", "liquidation", "lawsuit", "ban", "bankruptcy", "panic", "war")):
+            if any(w in low for w in ("hack", "exploit", "crash", "liquidation", "lawsuit", "ban", "bankruptcy", "panic")):
                 high_risk = True
+        # Новости должны быть мягким фильтром, а не главным предсказателем.
         score = clamp_float((pos - neg) * 1.8, -12, 12)
         if high_risk and neg >= pos:
             score = min(score, -6.0)
-        return pos, neg, neutral, score, high_risk
+        return pos, neg, score, high_risk
 
-    items: list[dict[str, str]] = []
-    urls: list[str] = []
+    all_titles: list[str] = []
+    source_hits: dict[str, int] = {}
+    urls = []
     for url in list(PROFIT_NEWS_RSS_URLS) + extra_queries:
         if url and url not in urls:
             urls.append(url)
@@ -6525,59 +6461,43 @@ async def fetch_profit_news_background(session: aiohttp.ClientSession, coin: str
                 if response.status != 200:
                     continue
                 raw_text = await response.text(errors="ignore")
-            blocks = re.findall(r"<(?:item|entry)[\s\S]*?</(?:item|entry)>", raw_text, flags=re.IGNORECASE)[:45]
+            blocks = re.findall(r"<(?:item|entry)\b[\s\S]*?</(?:item|entry)>", raw_text, flags=re.IGNORECASE)[:45]
             host = re.sub(r"^https?://", "", url).split("/")[0].replace("www.", "")
-            source = normalize_source(host)
             for block in blocks:
                 match = re.search(r"<title[^>]*>([\s\S]*?)</title>", block, flags=re.IGNORECASE)
                 if not match:
                     continue
                 title = clean_title(match.group(1))
-                if not title or len(title) < 12:
+                if not title:
                     continue
                 low = title.lower()
                 if any(term in low for term in coin_terms) or any(term in low for term in macro_terms):
-                    items.append({"title": title, "source": source})
+                    all_titles.append(title)
+                    source_hits[host] = source_hits.get(host, 0) + 1
         except Exception:
             logging.debug("Profit RSS news fetch failed: %s", url, exc_info=True)
 
-    unique_items: list[dict[str, str]] = []
+    unique_titles: list[str] = []
     seen: set[str] = set()
-    for item in items:
-        key = item["title"].lower()
+    for title in all_titles:
+        key = title.lower()
         if key in seen:
             continue
         seen.add(key)
-        unique_items.append(item)
+        unique_titles.append(title)
 
-    if not unique_items:
+    if not unique_titles:
         return {"score": 0.0, "text": "RSS/public новости не получены, фактор нейтральный"}
 
-    titles = [item["title"] for item in unique_items[:50]]
-    pos, neg, neutral, score, high_risk = score_titles(titles)
-    sources: list[str] = []
-    for item in unique_items:
-        source = item["source"]
-        if source not in sources:
-            sources.append(source)
-    preview = [f"{index}) {item['title']}" for index, item in enumerate(unique_items[:3], start=1)]
-    mood = "позитивный" if score > 2 else "негативный" if score < -2 else "нейтральный/смешанный"
-    source_text = ", ".join(sources[:4]) if sources else "RSS/public"
-    risk_text = " ⚠️ Высокий новостной риск." if high_risk else ""
-    text = (
-        f"Источники: {source_text}. "
-        f"Фон: {mood} (позитив {pos}, негатив {neg}, нейтрально {neutral})."
-        f"{risk_text} Ключевые заголовки: {'; '.join(preview)}"
-    )
+    pos, neg, score, high_risk = score_titles(unique_titles[:50])
+    preview = "; ".join(unique_titles[:3])
+    source_text = "+".join(list(source_hits.keys())[:4]) if source_hits else "RSS/public"
+    mood = "позитивный" if score > 2 else "негативный" if score < -2 else "смешанный/нейтральный"
+    risk_text = "; ⚠️ высокий новостной риск" if high_risk else ""
     return {
         "score": score,
-        "text": text,
+        "text": f"{source_text}: фон {mood}; позитив {pos}, негатив {neg}{risk_text}; {preview}",
         "high_risk": high_risk,
-        "positive": pos,
-        "negative": neg,
-        "neutral": neutral,
-        "sources": sources,
-        "headlines": preview,
     }
 
 
@@ -6818,149 +6738,6 @@ def build_eth_profit_text(data: dict[str, Any]) -> str:
 
 
 
-def render_profit_analysis_chart(data: dict[str, Any]) -> Optional[bytes]:
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except Exception:
-        logging.exception("matplotlib недоступен, график Profit не создан")
-        return None
-
-    candles = list(data.get("candles_15m") or [])
-    if len(candles) < 20:
-        return None
-
-    try:
-        chart_candles = candles[-72:]
-        xs = list(range(len(chart_candles)))
-        opens = [float(c["open"]) for c in chart_candles]
-        highs = [float(c["high"]) for c in chart_candles]
-        lows = [float(c["low"]) for c in chart_candles]
-        closes = [float(c["close"]) for c in chart_candles]
-        plan = data["plan"]
-        entry = float(plan["entry_ideal"])
-        stop = float(plan["stop"])
-        tps = [float(x) for x in plan.get("tps", [])[:3]]
-        last_price = float(data["current_price"])
-        long_probability = float(data["long_probability"])
-        short_probability = 100.0 - long_probability
-        side = str(data.get("side") or "LONG")
-        symbol = display_symbol(str(data.get("symbol") or data.get("coin_label") or ""))
-        coin_label = str(data.get("coin_label") or "")
-
-        fig, ax = plt.subplots(figsize=(13.5, 7.6), dpi=150)
-        fig.subplots_adjust(left=0.08, right=0.86, top=0.90, bottom=0.10)
-
-        for x, o, h, l, c in zip(xs, opens, highs, lows, closes):
-            color = "#149b68" if c >= o else "#d64b4b"
-            ax.vlines(x, l, h, color=color, linewidth=1.4, alpha=0.90)
-            ax.vlines(x, min(o, c), max(o, c), color=color, linewidth=5.2, alpha=0.98)
-
-        n = len(closes)
-        mean_x = (n - 1) / 2.0
-        mean_y = sum(closes) / n
-        denom = sum((x - mean_x) ** 2 for x in xs)
-        slope = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, closes)) / max(denom, 1e-9)
-        intercept = mean_y - slope * mean_x
-        regression = [slope * x + intercept for x in xs]
-        slope_window_pct = ((regression[-1] - regression[0]) / regression[0] * 100.0) if regression and regression[0] else 0.0
-        slope_per_candle_pct = (slope / entry * 100.0) if entry > 0 else 0.0
-        ax.plot(xs, regression, color="#2f6bff", linewidth=2.8, label="Наклонка")
-
-        x_right = xs[-1] + 6
-        ax.set_xlim(-1, x_right + 6)
-
-        def draw_level(price: float, label: str, color: str, linestyle: str = "--", linewidth: float = 1.8) -> None:
-            ax.axhline(price, color=color, linewidth=linewidth, linestyle=linestyle, alpha=0.95)
-            ax.text(
-                x_right,
-                price,
-                f" {label} {fmt_price(price)} ",
-                va="center",
-                ha="left",
-                fontsize=11,
-                fontweight="bold",
-                bbox={"boxstyle": "round,pad=0.28", "facecolor": "white", "edgecolor": color, "linewidth": 1.4},
-                clip_on=False,
-            )
-
-        draw_level(entry, "ВХОД", "#222222", "--", 2.2)
-        draw_level(stop, "СТОП", "#d64b4b", ":", 2.2)
-        for idx, tp in enumerate(tps, start=1):
-            draw_level(tp, f"TP{idx}", "#149b68", "-.", 1.9)
-        draw_level(last_price, "ЦЕНА", "#888888", "--", 1.2)
-
-        low_bound = min(lows + [entry, stop] + tps)
-        high_bound = max(highs + [entry, stop] + tps)
-        pad = max((high_bound - low_bound) * 0.12, last_price * 0.003)
-        ax.set_ylim(low_bound - pad, high_bound + pad)
-
-        arrow_target = tps[0] if tps else closes[-1]
-        ax.annotate(
-            "LONG ↑" if side == "LONG" else "SHORT ↓",
-            xy=(xs[-1], closes[-1]),
-            xytext=(xs[-1] - max(8, len(xs) // 5), arrow_target),
-            arrowprops={"arrowstyle": "->", "linewidth": 2.2, "color": "#111111"},
-            fontsize=16,
-            fontweight="bold",
-        )
-
-        prob_box = (
-            f"СЦЕНАРИЙ: {side}\n"
-            f"LONG: {long_probability:.0f}%\n"
-            f"SHORT: {short_probability:.0f}%\n"
-            f"Наклонка: {slope_window_pct:+.2f}%"
-        )
-        ax.text(
-            0.015,
-            0.98,
-            prob_box,
-            transform=ax.transAxes,
-            va="top",
-            ha="left",
-            fontsize=15,
-            fontweight="bold",
-            bbox={"boxstyle": "round,pad=0.45", "facecolor": "white", "edgecolor": "#111111", "linewidth": 1.4},
-        )
-
-        rr_box = (
-            f"RR TP1: {float(plan.get('ideal_rr') or 0.0):.2f}\n"
-            f"Рынок: {fmt_price(last_price)}\n"
-            f"Наклон/св: {slope_per_candle_pct:+.4f}%"
-        )
-        ax.text(
-            0.985,
-            0.98,
-            rr_box,
-            transform=ax.transAxes,
-            va="top",
-            ha="right",
-            fontsize=12,
-            fontweight="bold",
-            bbox={"boxstyle": "round,pad=0.40", "facecolor": "white", "edgecolor": "#2f6bff", "linewidth": 1.2},
-        )
-
-        ax.set_title(
-            f"{coin_label} Profit · {symbol} · 15m график\n"
-            f"Наклонка {slope_window_pct:+.2f}% за окно ({slope_per_candle_pct:+.4f}%/свечу)",
-            fontsize=16,
-            fontweight="bold",
-        )
-        ax.set_xlabel("Свечи 15m", fontsize=12, fontweight="bold")
-        ax.set_ylabel("Цена", fontsize=12, fontweight="bold")
-        ax.grid(True, alpha=0.25)
-        fig.tight_layout()
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png")
-        plt.close(fig)
-        buf.seek(0)
-        return buf.getvalue()
-    except Exception:
-        logging.exception("Не удалось построить график Profit")
-        return None
-
-
 async def fetch_eth_profit_funding_rate_pct(exchange_name: str, symbol: str) -> Optional[float]:
     exchange = None
     try:
@@ -6984,7 +6761,7 @@ async def fetch_eth_profit_funding_rate_pct(exchange_name: str, symbol: str) -> 
                 pass
     return None
 
-async def build_profit_analysis(symbol: str, coin_label: str, title_prefix: str) -> dict[str, Any]:
+async def build_profit_analysis(symbol: str, coin_label: str, title_prefix: str) -> str:
     coin_label = coin_label.upper()
     timeout = aiohttp.ClientTimeout(total=45)
     async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -7002,6 +6779,8 @@ async def build_profit_analysis(symbol: str, coin_label: str, title_prefix: str)
         candles_map: dict[str, Optional[list[dict[str, float]]]] = {}
         for key, result in zip(tasks.keys(), results):
             candles_map[key] = None if isinstance(result, Exception) else result
+        # На некоторых биржах kline endpoint не отдаёт меньше ~80 свечей.
+        # Поэтому короткие периоды собираем из более длинной истории, если прямой запрос пустой.
         if candles_map.get("year"):
             candles_map["month"] = (candles_map.get("month") or candles_map["year"][-35:])
         if candles_map.get("4h"):
@@ -7045,6 +6824,7 @@ async def build_profit_analysis(symbol: str, coin_label: str, title_prefix: str)
     if funding_rate_pct is None:
         funding_text = "не получен, фактор нейтральный"
     else:
+        # Положительный funding = longs pay shorts, это маленький контр-вес LONG.
         funding_score = clamp_float(-float(funding_rate_pct) * 80.0, -6, 6)
         funding_text = f"{funding_rate_pct:+.4f}% — {'давит на LONG' if funding_rate_pct > 0 else 'давит на SHORT' if funding_rate_pct < 0 else 'нейтрально'}"
     total_score = (
@@ -7068,6 +6848,7 @@ async def build_profit_analysis(symbol: str, coin_label: str, title_prefix: str)
     short_entry = float(levels["short_entry"])
     plan = eth_trade_plan(current_price, side, candles_15m, candles_1h, probability, funding_rate_pct)
 
+    # Прогнозная зона всегда строится в сторону сценария.
     if abs(total_score) <= 8:
         forecast_text = "флэт, вход только от уровня"
         forecast_low = min(support, resistance)
@@ -7080,12 +6861,10 @@ async def build_profit_analysis(symbol: str, coin_label: str, title_prefix: str)
         forecast_text = "снижение/шорт-преимущество"
         forecast_low = min(float(plan["tps"][0]), float(plan["tps"][1]))
         forecast_high = max(float(plan["tps"][0]), float(plan["tps"][1]))
-    return {
+    data = {
         "coin_label": coin_label,
-        "symbol": symbol,
         "title_prefix": title_prefix,
         "snapshots": snapshots,
-        "candles_15m": candles_15m,
         "current_price": current_price,
         "long_probability": long_probability,
         "side": side,
@@ -7106,15 +6885,15 @@ async def build_profit_analysis(symbol: str, coin_label: str, title_prefix: str)
         "forecast_low": forecast_low,
         "forecast_high": forecast_high,
     }
+    return build_eth_profit_text(data)
 
 
-async def build_eth_profit_analysis() -> dict[str, Any]:
+async def build_eth_profit_analysis() -> str:
     return await build_profit_analysis(ETH_PROFIT_SYMBOL, "ETH", "💎")
 
 
-async def build_btc_profit_analysis() -> dict[str, Any]:
+async def build_btc_profit_analysis() -> str:
     return await build_profit_analysis(BTC_PROFIT_SYMBOL, "BTC", "₿")
-
 
 def split_telegram_text(text: str, limit: int = 3900) -> list[str]:
     if len(text) <= limit:
@@ -7154,9 +6933,7 @@ async def answer_profit_analysis(message: Message, kind: str) -> None:
         f"🔎 {html.escape(title)}: собираю 1y/1M/1W/1D/4h/1h/15m/5m, историю паттернов, сессии, объёмы, funding, RSS/public новости и TradingView-style теханализ..."
     )
     try:
-        data = await builder()
-        text = build_eth_profit_text(data)
-        chart_png = render_profit_analysis_chart(data)
+        text = await builder()
     except asyncio.TimeoutError:
         logging.exception("%s timeout", title)
         await safe_edit(progress, f"⏳ {html.escape(title)}: биржа долго отвечает. Попробуй ещё раз.")
@@ -7167,14 +6944,6 @@ async def answer_profit_analysis(message: Message, kind: str) -> None:
         await message.answer(f"Ошибка: <code>{html.escape(str(exc))}</code>")
         return
     await safe_edit(progress, f"✅ {html.escape(title)} анализ готов")
-    if chart_png:
-        await message.answer_photo(
-            BufferedInputFile(chart_png, filename=f"{compact_symbol(str(data.get('symbol') or kind))}_profit_chart.png"),
-            caption=(
-                f"<b>{html.escape(title)}</b> · график 15m с наклонкой, входом, стопом и тейками.\n"
-                f"LONG: <b>{float(data['long_probability']):.0f}%</b> · SHORT: <b>{100.0 - float(data['long_probability']):.0f}%</b>"
-            ),
-        )
     parts = split_telegram_text(text)
     for index, part in enumerate(parts):
         await message.answer(part, reply_markup=keyboard if index == len(parts) - 1 else None)
@@ -7187,18 +6956,6 @@ async def answer_eth_profit_analysis(message: Message) -> None:
 
 async def answer_btc_profit_analysis(message: Message) -> None:
     await answer_profit_analysis(message, "BTC")
-
-
-async def handle_bot_restart_request(message: Message) -> None:
-    if message.from_user is None or not is_admin(message.from_user.id):
-        await message.answer("Только админ может делать рестарт бота.", reply_markup=keyboard)
-        return
-    reset_runtime_settings_to_defaults()
-    await message.answer(
-        "🔄 Рестарт запущен. Настройки бота сброшены к значениям по умолчанию, процесс сейчас перезапустится.",
-        reply_markup=keyboard,
-    )
-    asyncio.create_task(restart_current_process())
 
 
 # ---------- Telegram handlers ----------
@@ -7215,7 +6972,7 @@ async def cmd_start(message: Message) -> None:
         "Привет! Я Telegram-бот для автоматических торговых сигналов.\n\n"
         "Ты подписан на сигналы. Бот сам сканирует рынок и отправляет сетапы "
         f"с проходимостью от {MIN_SIGNAL_PROBABILITY}% и выше.\n\n"
-        "Команды: /help, /status, /settings, /scan, /ping, /super_deal, /btc_eth, /naklonki, /improvements, /polishing, /eth_profit, /btc_profit, /journal, /restart, /id, /stop",
+        "Команды: /help, /status, /settings, /scan, /ping, /super_deal, /btc_eth, /naklonki, /improvements, /polishing, /eth_profit, /btc_profit, /journal, /id, /stop",
         reply_markup=keyboard,
     )
 
@@ -7273,8 +7030,7 @@ async def cmd_help(message: Message) -> None:
         "• /trades — активные авто-сделки\n"
         "• /close_trade ID — ручное закрытие авто-сделки\n"
         "• отправь название монеты, например BTC или XMR, — я просканирую её отдельно\n"
-        "• /id — показать Telegram ID\n"
-        "• /restart — рестарт бота со сбросом настроек"
+        "• /id — показать Telegram ID"
         f"{admin_help}",
         reply_markup=keyboard,
     )
@@ -7342,11 +7098,6 @@ async def cmd_settings(message: Message) -> None:
         await message.answer("Настройки доступны только админу.")
         return
     await message.answer(settings_menu_text(), reply_markup=settings_keyboard())
-
-
-@dp.message(Command("restart"))
-async def cmd_restart(message: Message) -> None:
-    await handle_bot_restart_request(message)
 
 
 @dp.message(Command("smart"))
@@ -7800,16 +7551,6 @@ async def settings_callback(callback: CallbackQuery) -> None:
     if data == "settings:menu":
         await message.edit_text(settings_menu_text(), reply_markup=settings_keyboard())
         await callback.answer()
-        return
-
-    if data == "settings:restart":
-        reset_runtime_settings_to_defaults()
-        await message.edit_text(
-            "🔄 Рестарт запущен. Настройки бота сброшены к значениям по умолчанию, процесс сейчас перезапустится.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
-        )
-        await callback.answer("Перезапускаю бота")
-        asyncio.create_task(restart_current_process())
         return
 
     if data == "settings:auto_signals":
@@ -8592,11 +8333,6 @@ async def button_api(message: Message) -> None:
 @dp.message(F.text == "🔕 Отписаться")
 async def button_stop(message: Message) -> None:
     await cmd_stop(message)
-
-
-@dp.message(F.text == "🔄 Рестарт")
-async def button_restart(message: Message) -> None:
-    await handle_bot_restart_request(message)
 
 
 @dp.message()
